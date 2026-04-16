@@ -24,6 +24,7 @@ def notify():
     event_type = data.get("event_type")
     call_date = data.get("call_date")
     call_time = data.get("call_time")
+    timezone = data.get("timezone")
     venue = data.get("venue")
     package = data.get("package")
     meet_link = data.get("meet_link")  
@@ -49,6 +50,7 @@ def notify():
         f"{meet_line}\n"  
         f"📦 *Package Interest:* {package}\n"
         f"🕐 *Call:* {call_date} at {call_time}\n"
+        f"🌎 *Timezone:* {timezone}\n"
         f"🆔 *Lead ID:* {lead_id}\n\n"
         f"After the call, update the outcome below:"
     )
