@@ -26,6 +26,7 @@ def notify():
     call_time = data.get("call_time")
     venue = data.get("venue")
     package = data.get("package")
+    meet_link = data.get("meet_link")  
 
     # Store lead info for when Victoria taps a button
     pending_calls[lead_id] = {
@@ -36,12 +37,16 @@ def notify():
         "call_time": call_time
     }
 
+    # Build meet link line conditionally
+    meet_line = f"\n🔗 *Meet Link:* {meet_link}" if meet_link else ""  
+
     # Build the message
     message = (
         f"📅 *Discovery Call Booked*\n\n"
         f"👤 *Client:* {lead_name}\n"
         f"🎉 *Event:* {event_type}\n"
-        f"📍 *Venue:* {venue}\n"
+        f"📍 *Venue:* {venue}"
+        f"{meet_line}\n"  
         f"📦 *Package Interest:* {package}\n"
         f"🕐 *Call:* {call_date} at {call_time}\n"
         f"🆔 *Lead ID:* {lead_id}\n\n"
