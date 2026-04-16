@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 import requests
 import os
+import json
 
 app = Flask(__name__)
 
@@ -9,9 +10,21 @@ CHAT_ID = os.environ.get("CHAT_ID")
 ZAPIER_WEBHOOK_URL = os.environ.get("ZAPIER_WEBHOOK_URL")
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+PENDING_CALLS_FILE = "pending_calls.json"
 
-# Store pending calls temporarily
-pending_calls = {}
+
+def load_pending_calls():
+    """Load pending calls from file"""
+    if os.path.exists(PENDING_CALLS_FILE):
+        with open(PENDING_CALLS_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+
+def save_pending_calls(data):
+    """Save pending calls to file"""
+    with open(PENDING_CALLS_FILE, "w") as f:
+        json.dump(data, f)
 
 
 @app.route("/notify", methods=["POST"])
@@ -27,9 +40,10 @@ def notify():
     timezone = data.get("timezone")
     venue = data.get("venue")
     package = data.get("package")
-    meet_link = data.get("meet_link")  
+    meet_link = data.get("meet_link")
 
-    # Store lead info for when Victoria taps a button
+    # Load, update, and save pending calls
+    pending_calls = load_pending_calls()
     pending_calls[lead_id] = {
         "lead_id": lead_id,
         "lead_name": lead_name,
@@ -37,9 +51,10 @@ def notify():
         "call_date": call_date,
         "call_time": call_time
     }
+    save_pending_calls(pending_calls)
 
     # Build meet link line conditionally
-    meet_line = f"\n🔗 *Meet Link:* {meet_link}" if meet_link else ""  
+    meet_line = f"\n🔗 *Meet Link:* {meet_link}" if meet_link else ""
 
     # Build the message
     message = (
@@ -47,7 +62,7 @@ def notify():
         f"👤 *Client:* {lead_name}\n"
         f"🎉 *Event:* {event_type}\n"
         f"📍 *Venue:* {venue}"
-        f"{meet_line}\n"  
+        f"{meet_line}\n"
         f"📦 *Package Interest:* {package}\n"
         f"🕐 *Call:* {call_date} at {call_time}\n"
         f"🌎 *Timezone:* {timezone}\n"
@@ -120,7 +135,19 @@ def webhook():
         "reschedule": "Reschedule"
     }
 
+    # Map action to clean stage name
+    stage_map = {
+        "completed_continue": "Discovery Call - Completed",
+        "completed_stop": "Discovery Call - Closed",
+        "no_show": "Discovery Call - No Show",
+        "reschedule": "Discovery Call - Rescheduled"
+    }
+
     status = status_map.get(action, "Unknown")
+    current_stage = stage_map.get(action, "Discovery Call - Unknown")
+
+    # Load pending calls from file
+    pending_calls = load_pending_calls()
     lead_info = pending_calls.get(lead_id, {})
 
     # Answer the callback (removes loading spinner)
@@ -149,7 +176,8 @@ def webhook():
             "lead_id": lead_id,
             "lead_name": lead_info.get("lead_name"),
             "call_status": status,
-            "action": action
+            "action": action,
+            "current_stage": current_stage
         })
 
     return jsonify({"status": "processed"})
