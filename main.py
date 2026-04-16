@@ -13,6 +13,7 @@ TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 # Store pending calls temporarily
 pending_calls = {}
 
+
 @app.route("/notify", methods=["POST"])
 def notify():
     """Zapier calls this endpoint when a discovery call is booked"""
@@ -70,9 +71,26 @@ def notify():
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    """Telegram calls this when Victoria taps a button"""
+    """Telegram calls this when Victoria sends a message or taps a button"""
     data = request.json
 
+    # Handle incoming text messages (e.g. /start)
+    if "message" in data:
+        message_text = data["message"].get("text", "")
+        if message_text == "/start":
+            requests.post(f"{TELEGRAM_API}/sendMessage", json={
+                "chat_id": CHAT_ID,
+                "text": (
+                    "👋 *Everly Photography CRM Bot is active!*\n\n"
+                    "I'll notify you here after each Discovery Call is booked.\n"
+                    "Tap the outcome buttons after each call to update the pipeline automatically.\n\n"
+                    "✅ Ready and listening."
+                ),
+                "parse_mode": "Markdown"
+            })
+        return jsonify({"status": "ok"})
+
+    # Ignore anything that isn't a callback query
     if "callback_query" not in data:
         return jsonify({"status": "ignored"})
 
