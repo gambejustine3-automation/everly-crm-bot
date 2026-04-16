@@ -70,6 +70,7 @@ def notify():
         "chat_id": CHAT_ID,
         "text": message,
         "parse_mode": "Markdown",
+        "disable_web_page_preview": True,
         "reply_markup": keyboard
     })
 
