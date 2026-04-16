@@ -46,7 +46,7 @@ def notify():
         f"📅 *Discovery Call Booked*\n\n"
         f"👤 *Client:* {lead_name}\n"
         f"🎉 *Event:* {event_type}\n"
-        f"📍 *Venue:* {venue}\n"
+        f"📍 *Venue:* {venue}"
         f"{meet_line}\n"  
         f"📦 *Package Interest:* {package}\n"
         f"🕐 *Call:* {call_date} at {call_time}\n"
