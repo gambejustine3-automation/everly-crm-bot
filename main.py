@@ -54,30 +54,29 @@ def notify():
     save_pending_calls(pending_calls)
 
     # Build meet link line conditionally
-    meet_line = f"\n🔗 *Meet Link:* {meet_link}" if meet_link else ""
+    meet_line = f"\n🔗 Meet Link: {meet_link}" if meet_link else ""
 
     # Build the message
     message = (
-        f"📅 *Discovery Call Booked*\n\n"
-        f"👤 *Client:* {lead_name}\n"
-        f"🎉 *Event:* {event_type}\n"
-        f"📍 *Venue:* {venue}"
+        f"📅 Discovery Call Booked\n\n"
+        f"👤 Client: {lead_name}\n"
+        f"🎉 Event: {event_type}\n"
+        f"📍 Venue: {venue}"
         f"{meet_line}\n"
-        f"📦 *Package Interest:* {package}\n"
-        f"🕐 *Call:* {call_date} at {call_time}\n"
-        f"🌎 *Timezone:* {timezone}\n"
-        f"🆔 *Lead ID:* {lead_id}\n\n"
+        f"📦 Package Interest: {package}\n"
+        f"🕐 Call: {call_date} at {call_time}\n"
+        f"🌎 Timezone: {timezone}\n"
+        f"🆔 Lead ID: {lead_id}\n\n"
         f"After the call, update the outcome below:"
     )
 
-    # Build inline keyboard buttons
+    # Build inline keyboard — NO Send Proposal here
     keyboard = {
         "inline_keyboard": [
             [{"text": "✅ Completed - Continue", "callback_data": f"completed_continue|{lead_id}"}],
             [{"text": "❌ Completed - Not Continue", "callback_data": f"completed_stop|{lead_id}"}],
             [{"text": "👻 No Show", "callback_data": f"no_show|{lead_id}"}],
-            [{"text": "📅 Reschedule", "callback_data": f"reschedule|{lead_id}"}],
-            [{"text": "📋 Send Proposal", "callback_data": f"send_proposal|{lead_id}"}]  # NEW
+            [{"text": "📅 Reschedule", "callback_data": f"reschedule|{lead_id}"}]
         ]
     }
 
@@ -85,7 +84,6 @@ def notify():
     response = requests.post(f"{TELEGRAM_API}/sendMessage", json={
         "chat_id": CHAT_ID,
         "text": message,
-        "parse_mode": "Markdown",
         "disable_web_page_preview": True,
         "reply_markup": keyboard
     })
@@ -105,12 +103,11 @@ def webhook():
             requests.post(f"{TELEGRAM_API}/sendMessage", json={
                 "chat_id": CHAT_ID,
                 "text": (
-                    "👋 *Everly Photography CRM Bot is active!*\n\n"
+                    "👋 Everly Photography CRM Bot is active!\n\n"
                     "I'll notify you here after each Discovery Call is booked.\n"
                     "Tap the outcome buttons after each call to update the pipeline automatically.\n\n"
                     "✅ Ready and listening."
-                ),
-                "parse_mode": "Markdown"
+                )
             })
         return jsonify({"status": "ok"})
 
@@ -132,7 +129,7 @@ def webhook():
     pending_calls = load_pending_calls()
     lead_info = pending_calls.get(lead_id, {})
 
-    # --- NEW: Handle Send Proposal separately ---
+    # --- Handle Send Proposal ---
     if action == "send_proposal":
         PROPOSAL_ZAPIER_WEBHOOK = os.environ.get("PROPOSAL_ZAPIER_WEBHOOK")
         if PROPOSAL_ZAPIER_WEBHOOK:
@@ -149,17 +146,33 @@ def webhook():
             "chat_id": CHAT_ID,
             "message_id": message_id,
             "text": (
-                f"📋 *Proposal Flow Triggered*\n\n"
+                f"📋 Proposal Flow Triggered\n\n"
                 f"🆔 Lead ID: {lead_id}\n"
                 f"👤 Client: {lead_info.get('lead_name', 'Unknown')}\n\n"
                 f"✅ Proposal is being generated and sent."
-            ),
-            "parse_mode": "Markdown"
+            )
         })
         return jsonify({"status": "proposal_triggered"})
-    # --- END NEW ---
 
-    # Map action to status
+    # --- Handle Hold for Now ---
+    if action == "hold_proposal":
+        requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={
+            "callback_query_id": callback_id,
+            "text": "⏸ Held — you can send the proposal later."
+        })
+        requests.post(f"{TELEGRAM_API}/editMessageText", json={
+            "chat_id": CHAT_ID,
+            "message_id": message_id,
+            "text": (
+                f"⏸ Proposal On Hold\n\n"
+                f"👤 Client: {lead_info.get('lead_name', 'Unknown')}\n"
+                f"🆔 Lead ID: {lead_id}\n\n"
+                f"Proposal not sent yet. Trigger manually when ready."
+            )
+        })
+        return jsonify({"status": "proposal_held"})
+
+    # --- Map action to status and stage ---
     status_map = {
         "completed_continue": "Completed - Continue",
         "completed_stop": "Completed - Not Continue",
@@ -167,7 +180,6 @@ def webhook():
         "reschedule": "Reschedule"
     }
 
-    # Map action to clean stage name
     stage_map = {
         "completed_continue": "Discovery Call - Completed",
         "completed_stop": "Discovery Call - Closed",
@@ -189,13 +201,12 @@ def webhook():
         "chat_id": CHAT_ID,
         "message_id": message_id,
         "text": (
-            f"📋 *Call Outcome Logged*\n\n"
+            f"📋 Call Outcome Logged\n\n"
             f"🆔 Lead ID: {lead_id}\n"
             f"👤 Client: {lead_info.get('lead_name', 'Unknown')}\n"
-            f"📊 Status: *{status}*\n\n"
+            f"📊 Status: {status}\n\n"
             f"✅ Pipeline updated automatically."
-        ),
-        "parse_mode": "Markdown"
+        )
     })
 
     # Send outcome to Zapier webhook
@@ -206,6 +217,24 @@ def webhook():
             "call_status": status,
             "action": action,
             "current_stage": current_stage
+        })
+
+    # --- If Completed - Continue, send proposal follow-up message ---
+    if action == "completed_continue":
+        requests.post(f"{TELEGRAM_API}/sendMessage", json={
+            "chat_id": CHAT_ID,
+            "text": (
+                f"📋 Ready to send proposal?\n\n"
+                f"👤 Client: {lead_info.get('lead_name', 'Unknown')}\n"
+                f"🆔 Lead ID: {lead_id}\n\n"
+                f"The call went well! Do you want to send the proposal now?"
+            ),
+            "reply_markup": {
+                "inline_keyboard": [
+                    [{"text": "📋 Send Proposal", "callback_data": f"send_proposal|{lead_id}"}],
+                    [{"text": "⏸ Hold for Now", "callback_data": f"hold_proposal|{lead_id}"}]
+                ]
+            }
         })
 
     return jsonify({"status": "processed"})
