@@ -76,7 +76,8 @@ def notify():
             [{"text": "✅ Completed - Continue", "callback_data": f"completed_continue|{lead_id}"}],
             [{"text": "❌ Completed - Not Continue", "callback_data": f"completed_stop|{lead_id}"}],
             [{"text": "👻 No Show", "callback_data": f"no_show|{lead_id}"}],
-            [{"text": "📅 Reschedule", "callback_data": f"reschedule|{lead_id}"}]
+            [{"text": "📅 Reschedule", "callback_data": f"reschedule|{lead_id}"}],
+            [{"text": "📋 Send Proposal", "callback_data": f"send_proposal|{lead_id}"}]  # NEW
         ]
     }
 
@@ -127,6 +128,37 @@ def webhook():
     action = parts[0]
     lead_id = parts[1] if len(parts) > 1 else "unknown"
 
+    # Load pending calls from file
+    pending_calls = load_pending_calls()
+    lead_info = pending_calls.get(lead_id, {})
+
+    # --- NEW: Handle Send Proposal separately ---
+    if action == "send_proposal":
+        PROPOSAL_ZAPIER_WEBHOOK = os.environ.get("PROPOSAL_ZAPIER_WEBHOOK")
+        if PROPOSAL_ZAPIER_WEBHOOK:
+            requests.post(PROPOSAL_ZAPIER_WEBHOOK, json={
+                "lead_id": lead_id,
+                "lead_name": lead_info.get("lead_name"),
+                "trigger": "send_proposal"
+            })
+        requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={
+            "callback_query_id": callback_id,
+            "text": "📋 Proposal flow triggered ✅"
+        })
+        requests.post(f"{TELEGRAM_API}/editMessageText", json={
+            "chat_id": CHAT_ID,
+            "message_id": message_id,
+            "text": (
+                f"📋 *Proposal Flow Triggered*\n\n"
+                f"🆔 Lead ID: {lead_id}\n"
+                f"👤 Client: {lead_info.get('lead_name', 'Unknown')}\n\n"
+                f"✅ Proposal is being generated and sent."
+            ),
+            "parse_mode": "Markdown"
+        })
+        return jsonify({"status": "proposal_triggered"})
+    # --- END NEW ---
+
     # Map action to status
     status_map = {
         "completed_continue": "Completed - Continue",
@@ -145,10 +177,6 @@ def webhook():
 
     status = status_map.get(action, "Unknown")
     current_stage = stage_map.get(action, "Discovery Call - Unknown")
-
-    # Load pending calls from file
-    pending_calls = load_pending_calls()
-    lead_info = pending_calls.get(lead_id, {})
 
     # Answer the callback (removes loading spinner)
     requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={
