@@ -88,8 +88,7 @@ def notify():
 def proposal_confirmed():
     """
     Called after proposal is sent — asks Victoria if client confirmed.
-    Add a call to this endpoint from System 2 Telegram step (Step 11)
-    by POSTing to this URL with lead_id, lead_name, project_id.
+    POST to this URL with lead_id, lead_name, project_id from System 2 Zap (Step 11).
     """
     data = request.json
     lead_id = data.get("lead_id")
@@ -189,7 +188,12 @@ def webhook():
                 f"👤 Client: {lead_info.get('lead_name', 'Unknown')}\n"
                 f"🆔 Lead ID: {lead_id}\n\n"
                 f"Proposal not sent yet. Trigger manually when ready."
-            )
+            ),
+            "reply_markup": {
+                "inline_keyboard": [
+                    [{"text": "📋 Send Proposal Now", "callback_data": f"send_proposal|{lead_id}"}]
+                ]
+            }
         })
         return jsonify({"status": "proposal_held"})
 
@@ -220,6 +224,13 @@ def webhook():
 
     # --- Close Lead ---
     if action == "close_lead":
+        CLOSE_LEAD_WEBHOOK = os.environ.get("CLOSE_LEAD_WEBHOOK")
+        if CLOSE_LEAD_WEBHOOK:
+            requests.post(CLOSE_LEAD_WEBHOOK, json={
+                "lead_id": lead_id,
+                "lead_name": lead_info.get("lead_name"),
+                "trigger": "close_lead"
+            })
         requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={
             "callback_query_id": callback_id,
             "text": "❌ Lead closed."
