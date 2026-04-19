@@ -88,12 +88,26 @@ def notify():
 def proposal_confirmed():
     """
     Called after proposal is sent — asks Victoria if client confirmed.
-    POST to this URL with lead_id, lead_name, project_id from System 2 Zap (Step 11).
+    POST to this URL with lead_id, lead_name, project_id from System 2 Zap (Step 12).
+    Also saves to pending_calls so send_contract can look up the name later.
     """
     data = request.json
     lead_id = data.get("lead_id")
     lead_name = data.get("lead_name")
     project_id = data.get("project_id")
+
+    # Save to pending_calls so button callbacks can find the lead name
+    pending_calls = load_pending_calls()
+    if lead_id not in pending_calls:
+        pending_calls[lead_id] = {
+            "lead_id": lead_id,
+            "lead_name": lead_name,
+            "project_id": project_id
+        }
+    else:
+        # Update project_id if lead already exists from call booking
+        pending_calls[lead_id]["project_id"] = project_id
+    save_pending_calls(pending_calls)
 
     requests.post(f"{TELEGRAM_API}/sendMessage", json={
         "chat_id": CHAT_ID,
