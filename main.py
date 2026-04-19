@@ -14,7 +14,6 @@ PENDING_CALLS_FILE = "pending_calls.json"
 
 
 def load_pending_calls():
-    """Load pending calls from file"""
     if os.path.exists(PENDING_CALLS_FILE):
         with open(PENDING_CALLS_FILE, "r") as f:
             return json.load(f)
@@ -22,7 +21,6 @@ def load_pending_calls():
 
 
 def save_pending_calls(data):
-    """Save pending calls to file"""
     with open(PENDING_CALLS_FILE, "w") as f:
         json.dump(data, f)
 
@@ -42,7 +40,6 @@ def notify():
     package = data.get("package")
     meet_link = data.get("meet_link")
 
-    # Load, update, and save pending calls
     pending_calls = load_pending_calls()
     pending_calls[lead_id] = {
         "lead_id": lead_id,
@@ -53,10 +50,8 @@ def notify():
     }
     save_pending_calls(pending_calls)
 
-    # Build meet link line conditionally
     meet_line = f"\n🔗 Meet Link: {meet_link}" if meet_link else ""
 
-    # Build the message
     message = (
         f"📅 Discovery Call Booked\n\n"
         f"👤 Client: {lead_name}\n"
@@ -70,7 +65,6 @@ def notify():
         f"After the call, update the outcome below:"
     )
 
-    # Build inline keyboard — NO Send Proposal here
     keyboard = {
         "inline_keyboard": [
             [{"text": "✅ Completed - Continue", "callback_data": f"completed_continue|{lead_id}"}],
@@ -80,7 +74,6 @@ def notify():
         ]
     }
 
-    # Send to Telegram
     response = requests.post(f"{TELEGRAM_API}/sendMessage", json={
         "chat_id": CHAT_ID,
         "text": message,
@@ -91,12 +84,43 @@ def notify():
     return jsonify({"status": "sent", "telegram_response": response.json()})
 
 
+@app.route("/proposal_confirmed", methods=["POST"])
+def proposal_confirmed():
+    """
+    Called after proposal is sent — asks Victoria if client confirmed.
+    Add a call to this endpoint from System 2 Telegram step (Step 11)
+    by POSTing to this URL with lead_id, lead_name, project_id.
+    """
+    data = request.json
+    lead_id = data.get("lead_id")
+    lead_name = data.get("lead_name")
+    project_id = data.get("project_id")
+
+    requests.post(f"{TELEGRAM_API}/sendMessage", json={
+        "chat_id": CHAT_ID,
+        "text": (
+            f"📩 Did the client confirm the proposal?\n\n"
+            f"👤 Client: {lead_name}\n"
+            f"🆔 Project ID: {project_id}\n"
+            f"🆔 Lead ID: {lead_id}\n\n"
+            f"Once they reply yes, send the contract:"
+        ),
+        "reply_markup": {
+            "inline_keyboard": [
+                [{"text": "📝 Yes — Send Contract", "callback_data": f"send_contract|{lead_id}"}],
+                [{"text": "❌ No — Close Lead", "callback_data": f"close_lead|{lead_id}"}]
+            ]
+        }
+    })
+
+    return jsonify({"status": "confirmation_sent"})
+
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    """Telegram calls this when Victoria sends a message or taps a button"""
+    """Telegram calls this when Victoria taps a button"""
     data = request.json
 
-    # Handle incoming text messages (e.g. /start)
     if "message" in data:
         message_text = data["message"].get("text", "")
         if message_text == "/start":
@@ -105,13 +129,12 @@ def webhook():
                 "text": (
                     "👋 Everly Photography CRM Bot is active!\n\n"
                     "I'll notify you here after each Discovery Call is booked.\n"
-                    "Tap the outcome buttons after each call to update the pipeline automatically.\n\n"
+                    "Tap the outcome buttons after each call to update the pipeline.\n\n"
                     "✅ Ready and listening."
                 )
             })
         return jsonify({"status": "ok"})
 
-    # Ignore anything that isn't a callback query
     if "callback_query" not in data:
         return jsonify({"status": "ignored"})
 
@@ -120,16 +143,14 @@ def webhook():
     callback_data = callback["data"]
     message_id = callback["message"]["message_id"]
 
-    # Parse the callback
     parts = callback_data.split("|")
     action = parts[0]
     lead_id = parts[1] if len(parts) > 1 else "unknown"
 
-    # Load pending calls from file
     pending_calls = load_pending_calls()
     lead_info = pending_calls.get(lead_id, {})
 
-    # --- Handle Send Proposal ---
+    # --- Send Proposal ---
     if action == "send_proposal":
         PROPOSAL_ZAPIER_WEBHOOK = os.environ.get("PROPOSAL_ZAPIER_WEBHOOK")
         if PROPOSAL_ZAPIER_WEBHOOK:
@@ -154,11 +175,11 @@ def webhook():
         })
         return jsonify({"status": "proposal_triggered"})
 
-    # --- Handle Hold for Now ---
+    # --- Hold Proposal ---
     if action == "hold_proposal":
         requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={
             "callback_query_id": callback_id,
-            "text": "⏸ Held — you can send the proposal later."
+            "text": "⏸ Held — send proposal when ready."
         })
         requests.post(f"{TELEGRAM_API}/editMessageText", json={
             "chat_id": CHAT_ID,
@@ -172,7 +193,50 @@ def webhook():
         })
         return jsonify({"status": "proposal_held"})
 
-    # --- Map action to status and stage ---
+    # --- Send Contract ---
+    if action == "send_contract":
+        CONTRACT_ZAPIER_WEBHOOK = os.environ.get("CONTRACT_ZAPIER_WEBHOOK")
+        if CONTRACT_ZAPIER_WEBHOOK:
+            requests.post(CONTRACT_ZAPIER_WEBHOOK, json={
+                "lead_id": lead_id,
+                "lead_name": lead_info.get("lead_name"),
+                "trigger": "send_contract"
+            })
+        requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={
+            "callback_query_id": callback_id,
+            "text": "📝 Contract flow triggered ✅"
+        })
+        requests.post(f"{TELEGRAM_API}/editMessageText", json={
+            "chat_id": CHAT_ID,
+            "message_id": message_id,
+            "text": (
+                f"📝 Contract Flow Triggered\n\n"
+                f"🆔 Lead ID: {lead_id}\n"
+                f"👤 Client: {lead_info.get('lead_name', 'Unknown')}\n\n"
+                f"✅ Contract is being generated and sent for signature."
+            )
+        })
+        return jsonify({"status": "contract_triggered"})
+
+    # --- Close Lead ---
+    if action == "close_lead":
+        requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={
+            "callback_query_id": callback_id,
+            "text": "❌ Lead closed."
+        })
+        requests.post(f"{TELEGRAM_API}/editMessageText", json={
+            "chat_id": CHAT_ID,
+            "message_id": message_id,
+            "text": (
+                f"❌ Lead Closed\n\n"
+                f"🆔 Lead ID: {lead_id}\n"
+                f"👤 Client: {lead_info.get('lead_name', 'Unknown')}\n\n"
+                f"Pipeline updated. Lead marked as closed."
+            )
+        })
+        return jsonify({"status": "lead_closed"})
+
+    # --- Call outcome buttons ---
     status_map = {
         "completed_continue": "Completed - Continue",
         "completed_stop": "Completed - Not Continue",
@@ -190,13 +254,11 @@ def webhook():
     status = status_map.get(action, "Unknown")
     current_stage = stage_map.get(action, "Discovery Call - Unknown")
 
-    # Answer the callback (removes loading spinner)
     requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={
         "callback_query_id": callback_id,
         "text": f"Logged: {status}"
     })
 
-    # Edit the original message to show the outcome
     requests.post(f"{TELEGRAM_API}/editMessageText", json={
         "chat_id": CHAT_ID,
         "message_id": message_id,
@@ -209,7 +271,6 @@ def webhook():
         )
     })
 
-    # Send outcome to Zapier webhook
     if ZAPIER_WEBHOOK_URL:
         requests.post(ZAPIER_WEBHOOK_URL, json={
             "lead_id": lead_id,
@@ -219,7 +280,7 @@ def webhook():
             "current_stage": current_stage
         })
 
-    # --- If Completed - Continue, send proposal follow-up message ---
+    # After Completed Continue: ask about proposal
     if action == "completed_continue":
         requests.post(f"{TELEGRAM_API}/sendMessage", json={
             "chat_id": CHAT_ID,
@@ -227,7 +288,7 @@ def webhook():
                 f"📋 Ready to send proposal?\n\n"
                 f"👤 Client: {lead_info.get('lead_name', 'Unknown')}\n"
                 f"🆔 Lead ID: {lead_id}\n\n"
-                f"The call went well! Do you want to send the proposal now?"
+                f"The call went well! Send the proposal now?"
             ),
             "reply_markup": {
                 "inline_keyboard": [
