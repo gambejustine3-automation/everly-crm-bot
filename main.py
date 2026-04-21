@@ -137,6 +137,61 @@ def proposal_confirmed():
     return jsonify({"status": "confirmation_sent"})
 
 
+@app.route("/invoice_sent", methods=["POST"])
+def invoice_sent():
+    """
+    Called by Zap B after invoice is sent — notifies Victoria with
+    a 'Mark Shoot Complete' button to trigger System 4.
+    POST body: lead_id, lead_name, project_id, package, deposit,
+               invoice_date, due_date
+    """
+    data = request.json
+
+    lead_id = data.get("lead_id")
+    lead_name = data.get("lead_name")
+    project_id = data.get("project_id")
+    package = data.get("package")
+    deposit = data.get("deposit")
+    invoice_date = data.get("invoice_date")
+    due_date = data.get("due_date")
+
+    # Save to pending_calls so deliver_gallery can look up details later
+    pending_calls = load_pending_calls()
+    if lead_id not in pending_calls:
+        pending_calls[lead_id] = {}
+    pending_calls[lead_id].update({
+        "lead_id": lead_id,
+        "lead_name": lead_name,
+        "project_id": project_id,
+        "package": package,
+        "deposit": deposit
+    })
+    save_pending_calls(pending_calls)
+
+    requests.post(f"{TELEGRAM_API}/sendMessage", json={
+        "chat_id": CHAT_ID,
+        "text": (
+            f"🖊️ Contract Signed & Invoice Sent\n\n"
+            f"👤 Client: {lead_name}\n"
+            f"📁 Project ID: {project_id}\n"
+            f"📦 Package: {package}\n"
+            f"💰 Deposit Due: ${deposit}\n"
+            f"📅 Invoice Date: {invoice_date}\n"
+            f"⏳ Due Date: {due_date}\n\n"
+            f"Deposit invoice has been sent to the client automatically.\n"
+            f"Awaiting payment by due date.\n\n"
+            f"After the shoot, tap below to deliver the gallery:"
+        ),
+        "reply_markup": {
+            "inline_keyboard": [
+                [{"text": "📸 Mark Shoot Complete", "callback_data": f"deliver_gallery|{lead_id}"}]
+            ]
+        }
+    })
+
+    return jsonify({"status": "invoice_notification_sent"})
+
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     """Telegram calls this when Victoria taps a button or sends a message"""
@@ -145,7 +200,6 @@ def webhook():
     # --- Handle regular messages (free text input) ---
     if "message" in data:
         message_text = data["message"].get("text", "").strip()
-        chat_id = data["message"]["chat"]["id"]
 
         if message_text == "/start":
             requests.post(f"{TELEGRAM_API}/sendMessage", json={
@@ -195,7 +249,6 @@ def webhook():
             pending_calls[awaiting_lead_id]["pending_balance"] = balance
             save_pending_calls(pending_calls)
 
-            # Send confirmation message
             requests.post(f"{TELEGRAM_API}/sendMessage", json={
                 "chat_id": CHAT_ID,
                 "text": (
@@ -285,7 +338,6 @@ def webhook():
     if action == "send_contract":
         budget = lead_info.get("budget", "")
 
-        # High value lead — ask Victoria to type the price first
         if is_high_value_budget(budget):
             pending_calls[lead_id]["awaiting_price"] = True
             save_pending_calls(pending_calls)
@@ -309,7 +361,6 @@ def webhook():
             })
             return jsonify({"status": "awaiting_price"})
 
-        # Normal lead — fire contract webhook immediately
         CONTRACT_ZAPIER_WEBHOOK = os.environ.get("CONTRACT_ZAPIER_WEBHOOK")
         if CONTRACT_ZAPIER_WEBHOOK:
             requests.post(CONTRACT_ZAPIER_WEBHOOK, json={
@@ -339,7 +390,6 @@ def webhook():
         deposit = lead_info.get("pending_deposit")
         balance = lead_info.get("pending_balance")
 
-        # Clear awaiting state and pending values
         pending_calls[lead_id]["awaiting_price"] = False
         pending_calls[lead_id].pop("pending_total_price", None)
         pending_calls[lead_id].pop("pending_deposit", None)
@@ -429,6 +479,34 @@ def webhook():
         })
         return jsonify({"status": "lead_closed"})
 
+    # --- Deliver Gallery (System 4 trigger) ---
+    if action == "deliver_gallery":
+        DELIVER_GALLERY_WEBHOOK = os.environ.get("DELIVER_GALLERY_WEBHOOK")
+        if DELIVER_GALLERY_WEBHOOK:
+            requests.post(DELIVER_GALLERY_WEBHOOK, json={
+                "lead_id": lead_id,
+                "lead_name": lead_info.get("lead_name"),
+                "project_id": lead_info.get("project_id"),
+                "package": lead_info.get("package"),
+                "trigger": "deliver_gallery"
+            })
+        requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={
+            "callback_query_id": callback_id,
+            "text": "📸 Gallery delivery triggered ✅"
+        })
+        requests.post(f"{TELEGRAM_API}/editMessageText", json={
+            "chat_id": CHAT_ID,
+            "message_id": message_id,
+            "text": (
+                f"📸 Gallery Delivery Triggered\n\n"
+                f"👤 Client: {lead_info.get('lead_name', 'Unknown')}\n"
+                f"📁 Project: {lead_info.get('project_id', 'Unknown')}\n"
+                f"📦 Package: {lead_info.get('package', 'Unknown')}\n\n"
+                f"✅ Gallery folder is being created and sent to the client."
+            )
+        })
+        return jsonify({"status": "gallery_delivery_triggered"})
+
     # --- Call outcome buttons ---
     status_map = {
         "completed_continue": "Completed - Continue",
@@ -473,7 +551,6 @@ def webhook():
             "current_stage": current_stage
         })
 
-    # After Completed Continue: ask about proposal
     if action == "completed_continue":
         requests.post(f"{TELEGRAM_API}/sendMessage", json={
             "chat_id": CHAT_ID,
