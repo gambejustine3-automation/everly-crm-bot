@@ -25,6 +25,14 @@ def save_pending_calls(data):
         json.dump(data, f)
 
 
+def is_high_value_budget(budget):
+    """Check if budget requires manual price entry"""
+    if not budget:
+        return False
+    budget_str = str(budget).strip()
+    return "$10,000+" in budget_str or "TBD" in budget_str.upper() or budget_str.upper() == "TBD"
+
+
 @app.route("/notify", methods=["POST"])
 def notify():
     """Zapier calls this endpoint when a discovery call is booked"""
@@ -88,25 +96,25 @@ def notify():
 def proposal_confirmed():
     """
     Called after proposal is sent — asks Victoria if client confirmed.
-    POST to this URL with lead_id, lead_name, project_id from System 2 Zap (Step 12).
-    Also saves to pending_calls so send_contract can look up the name later.
+    POST body: lead_id, lead_name, project_id, budget
     """
     data = request.json
     lead_id = data.get("lead_id")
     lead_name = data.get("lead_name")
     project_id = data.get("project_id")
+    budget = data.get("budget", "")
 
-    # Save to pending_calls so button callbacks can find the lead name
     pending_calls = load_pending_calls()
     if lead_id not in pending_calls:
         pending_calls[lead_id] = {
             "lead_id": lead_id,
             "lead_name": lead_name,
-            "project_id": project_id
+            "project_id": project_id,
+            "budget": budget
         }
     else:
-        # Update project_id if lead already exists from call booking
         pending_calls[lead_id]["project_id"] = project_id
+        pending_calls[lead_id]["budget"] = budget
     save_pending_calls(pending_calls)
 
     requests.post(f"{TELEGRAM_API}/sendMessage", json={
@@ -131,11 +139,14 @@ def proposal_confirmed():
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    """Telegram calls this when Victoria taps a button"""
+    """Telegram calls this when Victoria taps a button or sends a message"""
     data = request.json
 
+    # --- Handle regular messages (free text input) ---
     if "message" in data:
-        message_text = data["message"].get("text", "")
+        message_text = data["message"].get("text", "").strip()
+        chat_id = data["message"]["chat"]["id"]
+
         if message_text == "/start":
             requests.post(f"{TELEGRAM_API}/sendMessage", json={
                 "chat_id": CHAT_ID,
@@ -146,6 +157,65 @@ def webhook():
                     "✅ Ready and listening."
                 )
             })
+            return jsonify({"status": "ok"})
+
+        # --- Handle price input for $10,000+ leads ---
+        pending_calls = load_pending_calls()
+        awaiting_lead_id = None
+
+        for lid, info in pending_calls.items():
+            if info.get("awaiting_price"):
+                awaiting_lead_id = lid
+                break
+
+        if awaiting_lead_id:
+            lead_info = pending_calls[awaiting_lead_id]
+
+            # Validate input is a number
+            clean_input = message_text.replace(",", "").replace("$", "").strip()
+            if not clean_input.isdigit():
+                requests.post(f"{TELEGRAM_API}/sendMessage", json={
+                    "chat_id": CHAT_ID,
+                    "text": (
+                        f"⚠️ Invalid input. Please type numbers only.\n"
+                        f"Example: 12000\n\n"
+                        f"What is the agreed total price for:\n"
+                        f"👤 {lead_info.get('lead_name')} | {lead_info.get('project_id')}"
+                    )
+                })
+                return jsonify({"status": "invalid_price"})
+
+            total_price = int(clean_input)
+            deposit = round(total_price * 0.30)
+            balance = total_price - deposit
+
+            # Store pending price for confirmation
+            pending_calls[awaiting_lead_id]["pending_total_price"] = total_price
+            pending_calls[awaiting_lead_id]["pending_deposit"] = deposit
+            pending_calls[awaiting_lead_id]["pending_balance"] = balance
+            save_pending_calls(pending_calls)
+
+            # Send confirmation message
+            requests.post(f"{TELEGRAM_API}/sendMessage", json={
+                "chat_id": CHAT_ID,
+                "text": (
+                    f"⚠️ Please confirm the total price:\n\n"
+                    f"👤 Client: {lead_info.get('lead_name')}\n"
+                    f"📁 Project: {lead_info.get('project_id')}\n"
+                    f"💰 Total Price: ${total_price:,}\n"
+                    f"💳 Deposit (30%): ${deposit:,}\n"
+                    f"💵 Balance (70%): ${balance:,}\n\n"
+                    f"Is this correct?"
+                ),
+                "reply_markup": {
+                    "inline_keyboard": [
+                        [{"text": "✅ Confirm & Send Contract", "callback_data": f"confirm_contract|{awaiting_lead_id}"}],
+                        [{"text": "❌ Re-enter Price", "callback_data": f"reenter_price|{awaiting_lead_id}"}]
+                    ]
+                }
+            })
+            return jsonify({"status": "price_confirmation_sent"})
+
         return jsonify({"status": "ok"})
 
     if "callback_query" not in data:
@@ -213,6 +283,33 @@ def webhook():
 
     # --- Send Contract ---
     if action == "send_contract":
+        budget = lead_info.get("budget", "")
+
+        # High value lead — ask Victoria to type the price first
+        if is_high_value_budget(budget):
+            pending_calls[lead_id]["awaiting_price"] = True
+            save_pending_calls(pending_calls)
+
+            requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={
+                "callback_query_id": callback_id,
+                "text": "💰 Price input required"
+            })
+            requests.post(f"{TELEGRAM_API}/editMessageText", json={
+                "chat_id": CHAT_ID,
+                "message_id": message_id,
+                "text": (
+                    f"📝 Contract — Price Required\n\n"
+                    f"👤 Client: {lead_info.get('lead_name', 'Unknown')}\n"
+                    f"📁 Project: {lead_info.get('project_id', 'Unknown')}\n"
+                    f"💰 Budget: {budget}\n\n"
+                    f"This lead requires manual price entry.\n"
+                    f"Please type the agreed total price below:\n"
+                    f"(numbers only, e.g. 12000)"
+                )
+            })
+            return jsonify({"status": "awaiting_price"})
+
+        # Normal lead — fire contract webhook immediately
         CONTRACT_ZAPIER_WEBHOOK = os.environ.get("CONTRACT_ZAPIER_WEBHOOK")
         if CONTRACT_ZAPIER_WEBHOOK:
             requests.post(CONTRACT_ZAPIER_WEBHOOK, json={
@@ -235,6 +332,77 @@ def webhook():
             )
         })
         return jsonify({"status": "contract_triggered"})
+
+    # --- Confirm Contract (after price entry) ---
+    if action == "confirm_contract":
+        total_price = lead_info.get("pending_total_price")
+        deposit = lead_info.get("pending_deposit")
+        balance = lead_info.get("pending_balance")
+
+        # Clear awaiting state and pending values
+        pending_calls[lead_id]["awaiting_price"] = False
+        pending_calls[lead_id].pop("pending_total_price", None)
+        pending_calls[lead_id].pop("pending_deposit", None)
+        pending_calls[lead_id].pop("pending_balance", None)
+        pending_calls[lead_id]["confirmed_total_price"] = total_price
+        pending_calls[lead_id]["confirmed_deposit"] = deposit
+        pending_calls[lead_id]["confirmed_balance"] = balance
+        save_pending_calls(pending_calls)
+
+        CONTRACT_ZAPIER_WEBHOOK = os.environ.get("CONTRACT_ZAPIER_WEBHOOK")
+        if CONTRACT_ZAPIER_WEBHOOK:
+            requests.post(CONTRACT_ZAPIER_WEBHOOK, json={
+                "lead_id": lead_id,
+                "lead_name": lead_info.get("lead_name"),
+                "trigger": "send_contract",
+                "total_price": total_price,
+                "deposit": deposit,
+                "balance": balance
+            })
+
+        requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={
+            "callback_query_id": callback_id,
+            "text": "📝 Contract flow triggered ✅"
+        })
+        requests.post(f"{TELEGRAM_API}/editMessageText", json={
+            "chat_id": CHAT_ID,
+            "message_id": message_id,
+            "text": (
+                f"📝 Contract Flow Triggered\n\n"
+                f"🆔 Lead ID: {lead_id}\n"
+                f"👤 Client: {lead_info.get('lead_name', 'Unknown')}\n"
+                f"📁 Project: {lead_info.get('project_id', 'Unknown')}\n"
+                f"💰 Total: ${total_price:,}\n"
+                f"💳 Deposit (30%): ${deposit:,}\n"
+                f"💵 Balance (70%): ${balance:,}\n\n"
+                f"✅ Contract is being generated and sent for signature."
+            )
+        })
+        return jsonify({"status": "contract_triggered"})
+
+    # --- Re-enter Price ---
+    if action == "reenter_price":
+        pending_calls[lead_id].pop("pending_total_price", None)
+        pending_calls[lead_id].pop("pending_deposit", None)
+        pending_calls[lead_id].pop("pending_balance", None)
+        save_pending_calls(pending_calls)
+
+        requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={
+            "callback_query_id": callback_id,
+            "text": "🔄 Please re-enter the price"
+        })
+        requests.post(f"{TELEGRAM_API}/editMessageText", json={
+            "chat_id": CHAT_ID,
+            "message_id": message_id,
+            "text": (
+                f"🔄 Re-enter Total Price\n\n"
+                f"👤 Client: {lead_info.get('lead_name', 'Unknown')}\n"
+                f"📁 Project: {lead_info.get('project_id', 'Unknown')}\n\n"
+                f"Please type the correct total price:\n"
+                f"(numbers only, e.g. 12000)"
+            )
+        })
+        return jsonify({"status": "reenter_price"})
 
     # --- Close Lead ---
     if action == "close_lead":
