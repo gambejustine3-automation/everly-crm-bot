@@ -95,7 +95,7 @@ def notify():
 @app.route("/proposal_confirmed", methods=["POST"])
 def proposal_confirmed():
     """
-    Called after proposal is sent — asks Victoria if client confirmed.
+    Called after proposal is sent — asks if client confirmed.
     POST body: lead_id, lead_name, project_id, budget
     """
     data = request.json
@@ -140,10 +140,10 @@ def proposal_confirmed():
 @app.route("/invoice_sent", methods=["POST"])
 def invoice_sent():
     """
-    Called by Zap B after invoice is sent — notifies Victoria with
+    Called by Zap B after invoice is sent — notifies with
     a 'Mark Shoot Complete' button to trigger System 4.
     POST body: lead_id, lead_name, project_id, package, deposit,
-               invoice_date, due_date
+               invoice_date, due_date, gallery_folder_url
     """
     data = request.json
 
@@ -154,6 +154,7 @@ def invoice_sent():
     deposit = data.get("deposit")
     invoice_date = data.get("invoice_date")
     due_date = data.get("due_date")
+    gallery_folder_url = data.get("gallery_folder_url", "")
 
     # Save to pending_calls so deliver_gallery can look up details later
     pending_calls = load_pending_calls()
@@ -164,7 +165,8 @@ def invoice_sent():
         "lead_name": lead_name,
         "project_id": project_id,
         "package": package,
-        "deposit": deposit
+        "deposit": deposit,
+        "gallery_folder_url": gallery_folder_url
     })
     save_pending_calls(pending_calls)
 
@@ -194,7 +196,7 @@ def invoice_sent():
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    """Telegram calls this when Victoria taps a button or sends a message"""
+    """Telegram calls this when a button is tapped or a message is sent"""
     data = request.json
 
     # --- Handle regular messages (free text input) ---
@@ -225,7 +227,6 @@ def webhook():
         if awaiting_lead_id:
             lead_info = pending_calls[awaiting_lead_id]
 
-            # Validate input is a number
             clean_input = message_text.replace(",", "").replace("$", "").strip()
             if not clean_input.isdigit():
                 requests.post(f"{TELEGRAM_API}/sendMessage", json={
@@ -243,7 +244,6 @@ def webhook():
             deposit = round(total_price * 0.30)
             balance = total_price - deposit
 
-            # Store pending price for confirmation
             pending_calls[awaiting_lead_id]["pending_total_price"] = total_price
             pending_calls[awaiting_lead_id]["pending_deposit"] = deposit
             pending_calls[awaiting_lead_id]["pending_balance"] = balance
@@ -479,8 +479,39 @@ def webhook():
         })
         return jsonify({"status": "lead_closed"})
 
-    # --- Deliver Gallery (System 4 trigger) ---
+    # --- Deliver Gallery (Step 1: Show confirmation + Drive link) ---
     if action == "deliver_gallery":
+        gallery_url = lead_info.get("gallery_folder_url", "")
+        drive_line = f"\n📁 [Review Photos in Drive]({gallery_url})" if gallery_url else ""
+
+        requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={
+            "callback_query_id": callback_id,
+            "text": "Review and confirm below 👇"
+        })
+        requests.post(f"{TELEGRAM_API}/editMessageText", json={
+            "chat_id": CHAT_ID,
+            "message_id": message_id,
+            "parse_mode": "Markdown",
+            "text": (
+                f"⚠️ *Confirm Gallery Delivery?*\n\n"
+                f"👤 Client: {lead_info.get('lead_name', 'Unknown')}\n"
+                f"📁 Project: {lead_info.get('project_id', 'Unknown')}\n"
+                f"📦 Package: {lead_info.get('package', 'Unknown')}"
+                f"{drive_line}\n\n"
+                f"This will share the folder and send the delivery email.\n"
+                f"Are you sure?"
+            ),
+            "reply_markup": {
+                "inline_keyboard": [
+                    [{"text": "✅ Yes, Send Gallery", "callback_data": f"confirm_delivery|{lead_id}"}],
+                    [{"text": "❌ Cancel", "callback_data": f"cancel_delivery|{lead_id}"}]
+                ]
+            }
+        })
+        return jsonify({"status": "confirmation_shown"})
+
+    # --- Confirm Delivery (Step 2: Fire S4 webhook) ---
+    if action == "confirm_delivery":
         DELIVER_GALLERY_WEBHOOK = os.environ.get("DELIVER_GALLERY_WEBHOOK")
         if DELIVER_GALLERY_WEBHOOK:
             requests.post(DELIVER_GALLERY_WEBHOOK, json={
@@ -497,15 +528,40 @@ def webhook():
         requests.post(f"{TELEGRAM_API}/editMessageText", json={
             "chat_id": CHAT_ID,
             "message_id": message_id,
+            "parse_mode": "Markdown",
             "text": (
-                f"📸 Gallery Delivery Triggered\n\n"
+                f"📸 *Gallery Delivery Triggered*\n\n"
                 f"👤 Client: {lead_info.get('lead_name', 'Unknown')}\n"
                 f"📁 Project: {lead_info.get('project_id', 'Unknown')}\n"
                 f"📦 Package: {lead_info.get('package', 'Unknown')}\n\n"
-                f"✅ Gallery folder is being created and sent to the client."
+                f"✅ Folder is being shared and delivery email is on its way."
             )
         })
         return jsonify({"status": "gallery_delivery_triggered"})
+
+    # --- Cancel Delivery (restore button, no action taken) ---
+    if action == "cancel_delivery":
+        requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={
+            "callback_query_id": callback_id,
+            "text": "Cancelled — no action taken."
+        })
+        requests.post(f"{TELEGRAM_API}/editMessageText", json={
+            "chat_id": CHAT_ID,
+            "message_id": message_id,
+            "parse_mode": "Markdown",
+            "text": (
+                f"❌ *Delivery Cancelled*\n\n"
+                f"👤 Client: {lead_info.get('lead_name', 'Unknown')}\n"
+                f"📁 Project: {lead_info.get('project_id', 'Unknown')}\n\n"
+                f"No action was taken. Tap below when ready to retry."
+            ),
+            "reply_markup": {
+                "inline_keyboard": [
+                    [{"text": "📸 Mark Shoot Complete", "callback_data": f"deliver_gallery|{lead_id}"}]
+                ]
+            }
+        })
+        return jsonify({"status": "delivery_cancelled"})
 
     # --- Call outcome buttons ---
     status_map = {
