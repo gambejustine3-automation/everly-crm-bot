@@ -140,8 +140,8 @@ def proposal_confirmed():
 @app.route("/invoice_sent", methods=["POST"])
 def invoice_sent():
     """
-    Called by Zap B after invoice is sent — notifies with
-    a 'Mark Shoot Complete' button to trigger System 4.
+    Called by S3B after invoice is sent.
+    Shows: Mark Deposit Paid (S3C) + Mark Shoot Complete (S4) buttons.
     POST body: lead_id, lead_name, project_id, package, deposit,
                invoice_date, due_date, gallery_folder_url
     """
@@ -156,7 +156,7 @@ def invoice_sent():
     due_date = data.get("due_date")
     gallery_folder_url = data.get("gallery_folder_url", "")
 
-    # Save to pending_calls so deliver_gallery can look up details later
+    # Save to pending_calls so later actions can look up details
     pending_calls = load_pending_calls()
     if lead_id not in pending_calls:
         pending_calls[lead_id] = {}
@@ -181,11 +181,12 @@ def invoice_sent():
             f"📅 Invoice Date: {invoice_date}\n"
             f"⏳ Due Date: {due_date}\n\n"
             f"Deposit invoice has been sent to the client automatically.\n"
-            f"Awaiting payment by due date.\n\n"
-            f"After the shoot, tap below to deliver the gallery:"
+            f"Awaiting deposit payment before blocking the calendar.\n\n"
+            f"Once the client pays, tap Mark Deposit Paid below:"
         ),
         "reply_markup": {
             "inline_keyboard": [
+                [{"text": "✅ Mark Deposit Paid", "callback_data": f"deposit_paid|{lead_id}"}],
                 [{"text": "📸 Mark Shoot Complete", "callback_data": f"deliver_gallery|{lead_id}"}]
             ]
         }
@@ -479,7 +480,49 @@ def webhook():
         })
         return jsonify({"status": "lead_closed"})
 
-    # --- Deliver Gallery (Step 1: Show confirmation + Drive link) ---
+    # ─────────────────────────────────────────────
+    # S3C — DEPOSIT PAID
+    # ─────────────────────────────────────────────
+
+    if action == "deposit_paid":
+        DEPOSIT_PAID_WEBHOOK = os.environ.get("DEPOSIT_PAID_WEBHOOK")
+        if DEPOSIT_PAID_WEBHOOK:
+            requests.post(DEPOSIT_PAID_WEBHOOK, json={
+                "lead_id": lead_id,
+                "project_id": lead_info.get("project_id"),
+                "lead_name": lead_info.get("lead_name"),
+                "trigger": "deposit_paid"
+            })
+        requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={
+            "callback_query_id": callback_id,
+            "text": "✅ Deposit marked as paid"
+        })
+        requests.post(f"{TELEGRAM_API}/editMessageText", json={
+            "chat_id": CHAT_ID,
+            "message_id": message_id,
+            "parse_mode": "Markdown",
+            "text": (
+                f"✅ *Deposit Paid — {lead_info.get('lead_name', 'Unknown')}*\n\n"
+                f"📁 Project: {lead_info.get('project_id', 'Unknown')}\n"
+                f"📦 Package: {lead_info.get('package', 'Unknown')}\n"
+                f"💰 Deposit: ${lead_info.get('deposit', '0')}\n\n"
+                f"📅 Calendar is being blocked for the shoot date.\n\n"
+                f"After the shoot is done and photos are ready,\n"
+                f"tap below to deliver the gallery:"
+            ),
+            "reply_markup": {
+                "inline_keyboard": [
+                    [{"text": "📸 Mark Shoot Complete", "callback_data": f"deliver_gallery|{lead_id}"}]
+                ]
+            }
+        })
+        return jsonify({"status": "deposit_paid"})
+
+    # ─────────────────────────────────────────────
+    # S4 — GALLERY DELIVERY
+    # ─────────────────────────────────────────────
+
+    # Step 1: Show confirmation + Drive review link
     if action == "deliver_gallery":
         gallery_url = lead_info.get("gallery_folder_url", "")
         drive_line = f"\n📁 [Review Photos in Drive]({gallery_url})" if gallery_url else ""
@@ -510,7 +553,7 @@ def webhook():
         })
         return jsonify({"status": "confirmation_shown"})
 
-    # --- Confirm Delivery (Step 2: Fire S4 webhook) ---
+    # Step 2: Fire S4 webhook
     if action == "confirm_delivery":
         DELIVER_GALLERY_WEBHOOK = os.environ.get("DELIVER_GALLERY_WEBHOOK")
         if DELIVER_GALLERY_WEBHOOK:
@@ -539,7 +582,7 @@ def webhook():
         })
         return jsonify({"status": "gallery_delivery_triggered"})
 
-    # --- Cancel Delivery (restore button, no action taken) ---
+    # Cancel: restore button, no action taken
     if action == "cancel_delivery":
         requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={
             "callback_query_id": callback_id,
@@ -563,7 +606,10 @@ def webhook():
         })
         return jsonify({"status": "delivery_cancelled"})
 
-    # --- Call outcome buttons ---
+    # ─────────────────────────────────────────────
+    # DISCOVERY CALL OUTCOME BUTTONS
+    # ─────────────────────────────────────────────
+
     status_map = {
         "completed_continue": "Completed - Continue",
         "completed_stop": "Completed - Not Continue",
