@@ -144,8 +144,8 @@ def fetch_cal_bookings(date_str):
         return []
     try:
         # Build date range: full day in ISO format
-        date_from = f"{date_str}T00:00:00Z"
-        date_to   = f"{date_str}T23:59:59Z"
+        date_from = f"{date_str}T00:00:00+08:00"
+        date_to   = f"{date_str}T23:59:59+08:00"
         url = "https://api.cal.com/v1/bookings"
         params = {
             "apiKey":   CAL_API_KEY,
