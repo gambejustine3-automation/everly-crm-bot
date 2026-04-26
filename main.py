@@ -908,7 +908,7 @@ def notify():
     if message and BOT_TOKEN and CHAT_ID:
         requests.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json={"chat_id": CHAT_ID, "text": message}
+            json={"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
         )
     return jsonify({"status": "sent"})
 
