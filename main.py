@@ -11,11 +11,14 @@ app = Flask(__name__)
 # ─────────────────────────────────────────────
 # ENVIRONMENT VARIABLES
 # ─────────────────────────────────────────────
-BOT_TOKEN                = os.environ.get("BOT_TOKEN")
+BOT_TOKEN                = os.environ.get("BOT_TOKEN")           # Everly&Co.ClientBot
+PIPELINE_BOT_TOKEN       = os.environ.get("PIPELINE_BOT_TOKEN") # Everly&Co.PipelineTrackerBot
+DASHBOARD_BOT_TOKEN      = os.environ.get("DASHBOARD_BOT_TOKEN")# Everly&Co.CRMDashboardBot
 CHAT_ID                  = os.environ.get("CHAT_ID")
-DASHBOARD_BOT_TOKEN      = os.environ.get("DASHBOARD_BOT_TOKEN")
 SPREADSHEET_ID           = os.environ.get("SPREADSHEET_ID")
 DASHBOARD_API            = f"https://api.telegram.org/bot{DASHBOARD_BOT_TOKEN}"
+PIPELINE_API             = f"https://api.telegram.org/bot{PIPELINE_BOT_TOKEN}"
+CLIENT_API               = f"https://api.telegram.org/bot{BOT_TOKEN}"
 SCOPES                   = ["https://www.googleapis.com/auth/spreadsheets"]
 CAL_API_KEY              = os.environ.get("CAL_API_KEY")
 CAL_EVENT_TYPE_ID        = os.environ.get("CAL_EVENT_TYPE_ID")
@@ -28,10 +31,9 @@ DEPOSIT_PAID_WEBHOOK     = os.environ.get("DEPOSIT_PAID_WEBHOOK")
 DELIVER_GALLERY_WEBHOOK  = os.environ.get("DELIVER_GALLERY_WEBHOOK")
 
 # ─────────────────────────────────────────────
-# PH TIME HELPER  ← always use this for "now"
+# PH TIME HELPER
 # ─────────────────────────────────────────────
 def ph_now():
-    """Returns current datetime in Philippine time (UTC+8)."""
     return datetime.utcnow() + timedelta(hours=8)
 
 # ─────────────────────────────────────────────
@@ -99,7 +101,7 @@ def get_col_letter(idx):
 
 def fire_webhook(url, payload):
     if not url:
-        print("[WEBHOOK] URL not set in environment variables.")
+        print("[WEBHOOK] URL not set.")
         return False
     try:
         r = requests.post(url, json=payload, timeout=10)
@@ -137,14 +139,26 @@ def edit_msg(chat_id, message_id, text, reply_markup=None):
     }
     requests.post(f"{DASHBOARD_API}/editMessageText", json=payload)
 
+def send_pipeline_msg(chat_id, text, reply_markup=None):
+    """Sends a message via the Pipeline Tracker Bot."""
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "reply_markup": reply_markup
+    }
+    requests.post(f"{PIPELINE_API}/sendMessage", json=payload)
+
+def send_client_msg(chat_id, text):
+    """Sends a message via the Client Bot."""
+    requests.post(f"{CLIENT_API}/sendMessage", json={
+        "chat_id": chat_id,
+        "text": text
+    })
+
 # ─────────────────────────────────────────────
 # CAL.COM API HELPER
 # ─────────────────────────────────────────────
 def fetch_cal_bookings(date_str):
-    """
-    Fetches bookings from Cal.com for a specific date.
-    date_str format: "YYYY-MM-DD" in PH time.
-    """
     if not CAL_API_KEY:
         print("[CAL] CAL_API_KEY not set.")
         return []
@@ -167,11 +181,9 @@ def fetch_cal_bookings(date_str):
         return []
 
 def parse_cal_booking(booking):
-    """Extracts key fields from a Cal.com booking object."""
     attendees    = booking.get("attendees", [])
     client_name  = attendees[0].get("name", "Unknown") if attendees else "Unknown"
     client_email = attendees[0].get("email", "—") if attendees else "—"
-
     responses = booking.get("responses", {})
     metadata  = booking.get("metadata", {})
     lead_id   = (
@@ -179,7 +191,6 @@ def parse_cal_booking(booking):
         or metadata.get("lead_id")
         or "—"
     )
-
     start_raw = booking.get("startTime", "")
     try:
         dt_utc   = datetime.strptime(start_raw, "%Y-%m-%dT%H:%M:%SZ")
@@ -187,7 +198,6 @@ def parse_cal_booking(booking):
         time_str = dt_local.strftime("%I:%M %p")
     except Exception:
         time_str = start_raw
-
     return {
         "id":           booking.get("id"),
         "uid":          booking.get("uid", ""),
@@ -291,7 +301,6 @@ def handle_hot_command(chat_id):
     send_msg(chat_id, "\n".join(lines), {"inline_keyboard": buttons})
 
 def handle_today_command(chat_id):
-    """Shows photography shoots happening today from the Leads sheet."""
     today_str     = ph_now().strftime("%Y-%m-%d")
     today_display = ph_now().strftime("%B %d, %Y")
     rows, col = read_sheet_with_headers("Leads!A1:T200")
@@ -314,7 +323,6 @@ def handle_today_command(chat_id):
     send_msg(chat_id, "\n".join(lines), {"inline_keyboard": buttons})
 
 def handle_schedule_command(chat_id, date_str=None, date_label=None):
-    """Shows Cal.com discovery call bookings for a given date in PH time."""
     now = ph_now()
     if not date_str:
         date_str   = now.strftime("%Y-%m-%d")
@@ -323,7 +331,7 @@ def handle_schedule_command(chat_id, date_str=None, date_label=None):
     bookings_raw = fetch_cal_bookings(date_str)
     bookings = [
         parse_cal_booking(b) for b in bookings_raw
-        if b.get("status") in ("ACCEPTED", "upcoming", "PENDING")
+        if b.get("status", "").upper() in ("ACCEPTED", "UPCOMING", "PENDING", "BOOKED")
     ]
 
     lines   = [f"📅 *DISCOVERY CALLS — {date_label}*\n"]
@@ -656,7 +664,6 @@ def _write_back(sheet_range_prefix, sheet_header_range, id_col, target_id, updat
 def dashboard():
     data = request.json
 
-    # ── TEXT COMMANDS ──
     if "message" in data:
         msg     = data["message"]
         text    = msg.get("text", "").strip()
@@ -693,7 +700,6 @@ def dashboard():
 
         return jsonify({"status": "ok"})
 
-    # ── CALLBACK QUERIES ──
     if "callback_query" not in data:
         return jsonify({"status": "ignored"})
 
@@ -878,7 +884,6 @@ def dashboard():
         answer_callback(cb["id"], "🖼️ Gallery delivered! ✅" if fired else "⚠️ Webhook failed")
         _show_pipeline(chat_id, msg_id, target_id)
 
-    # ── NAVIGATION ──
     elif action == "nav_leads":
         handle_leads_command(chat_id)
     elif action == "nav_pipe":
@@ -899,18 +904,170 @@ def dashboard():
 
 
 # ─────────────────────────────────────────────
-# NOTIFICATION BOT (inbound from Zapier)
+# CLIENT BOT — New inquiry notifications
 # ─────────────────────────────────────────────
 @app.route("/notify", methods=["POST"])
 def notify():
+    """Receives POST from Zapier and sends via Client Bot."""
     body    = request.json
     message = body.get("message", "")
     if message and BOT_TOKEN and CHAT_ID:
         requests.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json={"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
+            json={"chat_id": CHAT_ID, "text": message}
         )
     return jsonify({"status": "sent"})
+
+
+# ─────────────────────────────────────────────
+# PIPELINE BOT — Booking notifications with buttons
+# ─────────────────────────────────────────────
+@app.route("/pipeline_notify", methods=["POST"])
+def pipeline_notify():
+    """
+    Receives booking data from System 1.5 and sends a
+    notification with call outcome buttons via Pipeline Tracker Bot.
+
+    Expected payload:
+    {
+        "lead_id": "LED-0002",
+        "client_name": "Michael Scott",
+        "client_email": "...",
+        "lead_status": "HOT",
+        "urgency_score": "9",
+        "primary_package": "Elite Package",
+        "ai_summary": "...",
+        "call_time": "April 27 2026 12:00:00"
+    }
+    """
+    body          = request.json
+    lead_id       = body.get("lead_id", "—")
+    client_name   = body.get("client_name", "—")
+    client_email  = body.get("client_email", "—")
+    lead_status   = body.get("lead_status", "—")
+    urgency_score = body.get("urgency_score", "—")
+    package       = body.get("primary_package", "—")
+    ai_summary    = body.get("ai_summary", "—")
+    call_time     = body.get("call_time", "—")
+
+    text = (
+        f"📞 DISCOVERY CALL BOOKED\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 {client_name}\n"
+        f"✉️ {client_email}\n"
+        f"🆔 Lead: {lead_id}\n"
+        f"📅 Call: {call_time}\n"
+        f"🎯 {lead_status} | ⚡ {urgency_score}/10\n"
+        f"📦 {package}\n"
+        f"🧠 {ai_summary}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"What was the result of the discovery call?"
+    )
+
+    buttons = {
+        "inline_keyboard": [
+            [{"text": "✅ Completed — Continue",  "callback_data": f"call_out|{lead_id}|completed_continue"}],
+            [{"text": "🛑 Completed — Not a Fit", "callback_data": f"call_out|{lead_id}|completed_stop"}],
+            [{"text": "❌ No Show",               "callback_data": f"call_out|{lead_id}|no_show"}],
+            [{"text": "🔄 Reschedule",            "callback_data": f"call_out|{lead_id}|reschedule"}]
+        ]
+    }
+
+    if PIPELINE_BOT_TOKEN and CHAT_ID:
+        requests.post(
+            f"https://api.telegram.org/bot{PIPELINE_BOT_TOKEN}/sendMessage",
+            json={
+                "chat_id":      CHAT_ID,
+                "text":         text,
+                "reply_markup": buttons
+            }
+        )
+    return jsonify({"status": "sent"})
+
+
+# ─────────────────────────────────────────────
+# PIPELINE BOT WEBHOOK ROUTE
+# ─────────────────────────────────────────────
+@app.route("/pipeline_dashboard", methods=["POST"])
+def pipeline_dashboard():
+    """
+    Handles button taps from the Pipeline Tracker Bot.
+    Routes call outcome callbacks to the same handlers as /dashboard.
+    """
+    data = request.json
+
+    if "callback_query" not in data:
+        return jsonify({"status": "ignored"})
+
+    cb        = data["callback_query"]
+    chat_id   = cb["message"]["chat"]["id"]
+    msg_id    = cb["message"]["message_id"]
+    cb_data   = cb["data"]
+    parts     = cb_data.split("|")
+    action    = parts[0]
+    target_id = parts[1] if len(parts) > 1 else None
+
+    if action == "call_out":
+        outcome   = parts[2]
+        today_str = ph_now().strftime("%Y-%m-%d")
+        outcome_map = {
+            "completed_continue": {
+                "current_stage": "Discovery Call Completed",
+                "call_status":   "Completed",
+                "next_action":   "Send Proposal"
+            },
+            "completed_stop": {
+                "current_stage": "Closed Lost",
+                "call_status":   "Completed",
+                "next_action":   "Archive Lead"
+            },
+            "no_show": {
+                "current_stage": "Discovery Call Booked",
+                "call_status":   "No Show",
+                "next_action":   "Follow up / Reschedule"
+            },
+            "reschedule": {
+                "current_stage": "Discovery Call Booked",
+                "call_status":   "Rescheduling",
+                "next_action":   "Send new Cal.com link"
+            }
+        }
+        mapping = outcome_map.get(outcome, {})
+        _write_back(
+            "Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", target_id,
+            {
+                "Current_Stage":    mapping.get("current_stage", "—"),
+                "Call_Status":      mapping.get("call_status", "—"),
+                "Last_Action":      "Discovery Call Completed",
+                "Next_Action":      mapping.get("next_action", "—"),
+                "Next_Action_Date": today_str
+            }
+        )
+        fired = fire_webhook(CLOSE_LEAD_WEBHOOK, {
+            "lead_id":       target_id,
+            "action":        outcome,
+            "current_stage": mapping.get("current_stage"),
+            "call_status":   mapping.get("call_status"),
+            "timestamp":     today_str
+        })
+        outcome_labels = {
+            "completed_continue": "✅ Completed — moving to Proposal",
+            "completed_stop":     "🛑 Closed as Not a Fit",
+            "no_show":            "❌ Marked as No Show",
+            "reschedule":         "🔄 Marked for Rescheduling"
+        }
+        # Answer the callback via Pipeline Bot
+        requests.post(f"{PIPELINE_API}/answerCallbackQuery", json={
+            "callback_query_id": cb["id"],
+            "text": outcome_labels.get(outcome, "Updated ✅")
+        })
+        # Confirm in the Pipeline Bot chat
+        requests.post(f"{PIPELINE_API}/sendMessage", json={
+            "chat_id": CHAT_ID,
+            "text": f"✅ {outcome_labels.get(outcome)} for Lead {target_id}"
+        })
+
+    return jsonify({"status": "ok"})
 
 
 if __name__ == "__main__":
