@@ -11,15 +11,20 @@ app = Flask(__name__)
 # ─────────────────────────────────────────────
 # ENVIRONMENT VARIABLES
 # ─────────────────────────────────────────────
+# We use DASHBOARD_BOT_TOKEN for the Dashboard Bot's API calls
 BOT_TOKEN                = os.environ.get("BOT_TOKEN")           # Everly&Co.ClientBot
 PIPELINE_BOT_TOKEN       = os.environ.get("PIPELINE_BOT_TOKEN") # Everly&Co.PipelineTrackerBot
 DASHBOARD_BOT_TOKEN      = os.environ.get("DASHBOARD_BOT_TOKEN")# Everly&Co.CRMDashboardBot
 CHAT_ID                  = os.environ.get("CHAT_ID")
 SPREADSHEET_ID           = os.environ.get("SPREADSHEET_ID")
+
+# Ensure we are using the DASHBOARD_BOT_TOKEN for the dashboard commands
 DASHBOARD_API            = f"https://api.telegram.org/bot{DASHBOARD_BOT_TOKEN}"
 PIPELINE_API             = f"https://api.telegram.org/bot{PIPELINE_BOT_TOKEN}"
 CLIENT_API               = f"https://api.telegram.org/bot{BOT_TOKEN}"
+
 SCOPES                   = ["https://www.googleapis.com/auth/spreadsheets"]
+
 CAL_API_KEY              = os.environ.get("CAL_API_KEY")
 CAL_EVENT_TYPE_ID        = os.environ.get("CAL_EVENT_TYPE_ID")
 
@@ -127,6 +132,7 @@ def send_msg(chat_id, text, reply_markup=None):
         "parse_mode": "Markdown",
         "reply_markup": reply_markup
     }
+    # IMPORTANT: Ensure this uses DASHBOARD_API
     r = requests.post(f"{DASHBOARD_API}/sendMessage", json=payload)
     if not r.ok:
         print(f"[SEND ERROR] {r.status_code}: {r.text}")
@@ -712,7 +718,7 @@ def dashboard():
                     col_idx = col.get("Email")
                     col_letter = get_col_letter(col_idx)
                     write_sheet(f"Leads!{col_letter}{row_num}", [[new_email]])
-                    # Use the incoming chat_id for confirmation
+                    # Explicitly using DASHBOARD_API for the confirmation message
                     send_msg(chat_id, f"✅ Email updated for {lead_id} → {new_email}", None)
                     found = True
                     break
