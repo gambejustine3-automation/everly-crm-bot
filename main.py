@@ -810,6 +810,65 @@ def dashboard():
         })
 
     return jsonify({"status": "ok"})
+    
+@app.route("/pipeline_dashboard", methods=["POST"])
+def pipeline_dashboard():
+    data = request.json
 
+    if "callback_query" in data:
+        cb        = data["callback_query"]
+        chat_id   = cb["message"]["chat"]["id"]
+        msg_id    = cb["message"]["message_id"]
+        cb_data   = cb.get("data", "")
+        parts     = cb_data.split("|")
+        action    = parts[0]
+        target_id = parts[1] if len(parts) > 1 else None
+
+        if action == "call_menu":
+            _show_call_menu(chat_id, msg_id, target_id)
+        elif action == "call_out" and len(parts) > 2:
+            outcome   = parts[2]
+            today_str = ph_now().strftime("%Y-%m-%d")
+            outcome_map = {
+                "completed_continue": {"current_stage": "Discovery Call Completed", "call_status": "Completed",   "next_action": "Send Proposal"},
+                "completed_stop":     {"current_stage": "Closed Lost",              "call_status": "Completed",   "next_action": "Archive Lead"},
+                "no_show":            {"current_stage": "Discovery Call Booked",    "call_status": "No Show",     "next_action": "Follow up / Reschedule"},
+                "reschedule":         {"current_stage": "Discovery Call Booked",    "call_status": "Rescheduling","next_action": "Send new Cal.com link"}
+            }
+            mapping = outcome_map.get(outcome, {})
+            _write_back(
+                "Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", target_id,
+                {
+                    "Current_Stage":    mapping.get("current_stage", "—"),
+                    "Call_Status":      mapping.get("call_status", "—"),
+                    "Last_Action":      "Discovery Call Completed",
+                    "Next_Action":      mapping.get("next_action", "—"),
+                    "Next_Action_Date": today_str
+                }
+            )
+            fire_webhook(CLOSE_LEAD_WEBHOOK, {
+                "lead_id":       target_id,
+                "action":        outcome,
+                "current_stage": mapping.get("current_stage"),
+                "call_status":   mapping.get("call_status"),
+                "timestamp":     today_str
+            })
+            outcome_labels = {
+                "completed_continue": "✅ Completed — moving to Proposal",
+                "completed_stop":     "🛑 Closed as Not a Fit",
+                "no_show":            "❌ Marked as No Show",
+                "reschedule":         "🔄 Marked for Rescheduling"
+            }
+            requests.post(f"{PIPELINE_API}/answerCallbackQuery", json={
+                "callback_query_id": cb["id"],
+                "text": outcome_labels.get(outcome, "Updated ✅")
+            })
+            requests.post(f"{PIPELINE_API}/sendMessage", json={
+                "chat_id": CHAT_ID,
+                "text": f"✅ {outcome_labels.get(outcome)} for Lead {target_id}"
+            })
+
+    return jsonify({"status": "ok"})
+    
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
