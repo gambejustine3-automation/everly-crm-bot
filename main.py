@@ -115,17 +115,15 @@ def fire_webhook(url, payload):
 # TELEGRAM SEND/EDIT HELPERS - CLEANED FOR DASHBOARD ONLY
 # ─────────────────────────────────────────────
 def send_msg(chat_id, text, reply_markup=None):
-    """Send message using CRM Dashboard Bot ONLY. No fallback to Pipeline Tracker."""
     payload = {
         "chat_id": chat_id,
         "text": text,
         "parse_mode": "Markdown",
-        "reply_markup": reply_markup
     }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
     r = requests.post(f"{DASHBOARD_API}/sendMessage", json=payload)
-    print(f"[DASHBOARD SEND] Status: {r.status_code} | Text: {text[:150]}")
-    if not r.ok:
-        print(f"[DASHBOARD SEND FAILED] Response: {r.text}")
+    print(f"[SEND_MSG] Status: {r.status_code} | {r.text[:200]}")
     return r
 
 def edit_msg(chat_id, message_id, text, reply_markup=None):
