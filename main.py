@@ -60,7 +60,7 @@ OUTCOME_LABELS = {
 
 OUTCOME_MAP = {
     "completed_continue": {"current_stage": "Discovery Call Completed", "call_status": "Completed",    "next_action": "Send Proposal"},
-    "completed_stop":     {"current_stage": "Closed Lost",              "call_status": "Completed",    "next_action": "Archive Lead"},
+    "completed_stop":     {"current_stage": "Closed Lost",              "call_status": "Completed-Not Continue",    "next_action": "Archive Lead"},
     "no_show":            {"current_stage": "Discovery Call Booked",    "call_status": "No Show",      "next_action": "Follow up / Reschedule"},
     "reschedule":         {"current_stage": "Discovery Call Booked",    "call_status": "Rescheduling", "next_action": "Send new Cal.com link"}
 }
