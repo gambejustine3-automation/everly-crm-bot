@@ -112,10 +112,10 @@ def fire_webhook(url, payload):
         return False
 
 # ─────────────────────────────────────────────
-# TELEGRAM SEND/EDIT HELPERS - FIXED
+# TELEGRAM SEND/EDIT HELPERS - CLEANED FOR DASHBOARD ONLY
 # ─────────────────────────────────────────────
 def send_msg(chat_id, text, reply_markup=None):
-    """Always send using CRM Dashboard Bot first. No forced fallback for updateemail."""
+    """Send message using CRM Dashboard Bot ONLY. No fallback to Pipeline Tracker."""
     payload = {
         "chat_id": chat_id,
         "text": text,
@@ -123,7 +123,9 @@ def send_msg(chat_id, text, reply_markup=None):
         "reply_markup": reply_markup
     }
     r = requests.post(f"{DASHBOARD_API}/sendMessage", json=payload)
-    print(f"[DASHBOARD SEND] {r.status_code}: {r.text[:300]}")
+    print(f"[DASHBOARD SEND] Status: {r.status_code} | Text: {text[:150]}")
+    if not r.ok:
+        print(f"[DASHBOARD SEND FAILED] Response: {r.text}")
     return r
 
 def edit_msg(chat_id, message_id, text, reply_markup=None):
@@ -137,7 +139,7 @@ def edit_msg(chat_id, message_id, text, reply_markup=None):
     requests.post(f"{DASHBOARD_API}/editMessageText", json=payload)
 
 def send_pipeline_msg(chat_id, text, reply_markup=None):
-    """Only use this when you intentionally want to send via Pipeline Tracker Bot"""
+    """Only used for pipeline callbacks - not for /updateemail"""
     payload = {
         "chat_id": chat_id,
         "text": text,
@@ -232,7 +234,12 @@ def handle_help_command(chat_id):
         "`/today` — Today's photography shoots\n\n"
         "👤 *Clients & Projects*\n"
         "`/client <ID>` — Full client card with LTV and booking history\n"
-        "`/project` — All active projects and their current stage"
+        "`/project` — All active projects and their current stage\n\n"
+        "💡 *Tips*\n"
+        "• Tap any lead or client button to drill in\n"
+        "• Update lead status (HOT/WARM/COLD) from the lead card\n"
+        "• Log call outcomes right after a discovery call\n"
+        "• Move pipeline stages with one tap"
     )
     send_msg(chat_id, text)
 
@@ -374,8 +381,8 @@ def handle_tomorrow_command(chat_id):
     tomorrow_lbl = tomorrow.strftime("%B %d, %Y")
     handle_schedule_command(
         chat_id,
-        date_str=tomorrow_str,
-        date_label=f"Tomorrow — {tomorrow_lbl}"
+        date_str = tomorrow_str,
+        date_label = f"Tomorrow — {tomorrow_lbl}"
     )
 
 def handle_search_command(chat_id, query):
@@ -680,7 +687,7 @@ def dashboard():
             cid = text[len("/client"):].strip()
             handle_client_command(chat_id, cid)
         elif text.startswith("/updateemail"):
-            # FIXED: Always uses send_msg() → CRM Dashboard Bot only
+            # FIXED: Uses send_msg() → only CRM Dashboard Bot
             parts = text.split()
             if len(parts) != 3:
                 send_msg(chat_id, "Usage: /updateemail <Lead_ID> <new_email>", None)
