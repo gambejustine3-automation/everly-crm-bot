@@ -53,7 +53,7 @@ STATUS_EMOJI = {"HOT": "🔴", "WARM": "🟡", "COLD": "🔵"}
 # ─────────────────────────────────────────────
 
 def ph_now():
-    """Return current time in Philippines (UTC+8)"""
+    """Return current Philippines time (UTC+8)"""
     return datetime.utcnow() + timedelta(hours=8)
 
 
@@ -64,7 +64,6 @@ def get_sheets_service():
 
 
 def read_sheet_with_headers(range_name):
-    """Read Google Sheet and return rows + column index mapping"""
     try:
         service = get_sheets_service()
         result = service.spreadsheets().values().get(
@@ -84,7 +83,6 @@ def read_sheet_with_headers(range_name):
 
 
 def write_sheet(range_name, values):
-    """Write values to Google Sheet"""
     try:
         service = get_sheets_service()
         service.spreadsheets().values().update(
@@ -100,14 +98,12 @@ def write_sheet(range_name, values):
 
 
 def safe_get(row, col, key):
-    """Safely get value from sheet row"""
     if key not in col or len(row) <= col[key]:
         return "—"
     return row[col[key]] if row[col[key]] else "—"
 
 
 def get_col_letter(idx):
-    """Convert column index to Excel letter (0 → A, 26 → AA, etc.)"""
     result = ""
     while idx >= 0:
         result = chr(65 + (idx % 26)) + result
@@ -116,7 +112,6 @@ def get_col_letter(idx):
 
 
 def fire_webhook(url, payload):
-    """Fire Zapier webhook"""
     if not url:
         print("[WEBHOOK] URL not set.")
         return False
@@ -130,7 +125,6 @@ def fire_webhook(url, payload):
 
 
 def answer_callback(cb_id, text, bot_api=None):
-    """Answer Telegram callback query"""
     api = bot_api or DASHBOARD_API
     requests.post(f"{api}/answerCallbackQuery", json={
         "callback_query_id": cb_id,
@@ -139,7 +133,7 @@ def answer_callback(cb_id, text, bot_api=None):
 
 
 # ─────────────────────────────────────────────
-# TELEGRAM SEND / EDIT HELPERS
+# TELEGRAM SEND/EDIT HELPERS
 # ─────────────────────────────────────────────
 
 def send_msg(chat_id, text, reply_markup=None):
@@ -190,7 +184,6 @@ def fetch_cal_bookings(date_str):
     try:
         date_from = f"{date_str}T00:00:00+08:00"
         date_to = f"{date_str}T23:59:59+08:00"
-
         url = "https://api.cal.com/v1/bookings"
         params = {
             "apiKey": CAL_API_KEY,
@@ -220,7 +213,6 @@ def parse_cal_booking(booking):
         or "—"
     )
 
-    # Convert time to PH time
     start_raw = booking.get("startTime", "")
     try:
         dt_utc = datetime.strptime(start_raw, "%Y-%m-%dT%H:%M:%SZ")
@@ -241,12 +233,12 @@ def parse_cal_booking(booking):
     }
 
 # ─────────────────────────────────────────────
-# GOOGLE SHEETS WRITE-BACK HELPER
+# GOOGLE SHEETS WRITE HELPER
 # ─────────────────────────────────────────────
 
 def _write_back(sheet_range_prefix, sheet_header_range, id_col, target_id, updates: dict):
     rows, col = read_sheet_with_headers(sheet_header_range)
-    for i, row in enumerate(rows, 2):  # +2 because row 1 is header
+    for i, row in enumerate(rows, 2):
         if safe_get(row, col, id_col) == target_id:
             for col_name, new_value in updates.items():
                 if col_name in col:
@@ -256,33 +248,495 @@ def _write_back(sheet_range_prefix, sheet_header_range, id_col, target_id, updat
     return False
 
 # ─────────────────────────────────────────────
-# COMMAND & VIEW HANDLERS
+# COMMAND HANDLERS
 # ─────────────────────────────────────────────
 
-# (All your handle_xxx and _show_xxx functions go here)
-# For brevity, I kept only the structure. Paste your cleaned handlers below this section.
-
-# Example of one cleaned handler:
 def handle_start_command(chat_id):
     text = (
         "📸 *Welcome to Everly & Co. CRM Dashboard*\n\n"
-        "Use /menu for quick navigation\n"
-        "Use /help to see all available commands"
+        "Use /menu for quick navigation buttons\n"
+        "Use /help to see all commands and what they do"
     )
     send_msg(chat_id, text)
 
 
-# ... (include all other handlers: handle_help, handle_menu, handle_leads, etc.)
+def handle_help_command(chat_id):
+    text = (
+        "📖 *COMMAND REFERENCE*\n\n"
+        "📋 *Leads & Pipeline*\n"
+        "`/leads` — View your latest 10 leads with status\n"
+        "`/hot` — Show only HOT priority leads\n"
+        "`/pipeline` — See all pipeline stages at a glance\n"
+        "`/search <name or email>` — Find a specific lead\n\n"
+        "📅 *Schedule*\n"
+        "`/schedule` — Today's discovery calls from Cal.com\n"
+        "`/tomorrow` — Tomorrow's discovery calls\n"
+        "`/today` — Today's photography shoots\n\n"
+        "👤 *Clients & Projects*\n"
+        "`/client <ID>` — Full client card with LTV and booking history\n"
+        "`/project` — All active projects and their current stage"
+    )
+    send_msg(chat_id, text)
+
+
+def handle_menu_command(chat_id):
+    text = "📸 *Everly & Co. CRM — Quick Menu*"
+    buttons = [
+        [
+            {"text": "📋 Leads", "callback_data": "nav_leads|none"},
+            {"text": "🔴 Hot Leads", "callback_data": "nav_hot|none"}
+        ],
+        [
+            {"text": "📊 Pipeline", "callback_data": "nav_pipe|none"},
+            {"text": "🗂 Projects", "callback_data": "nav_projects|none"}
+        ],
+        [
+            {"text": "📅 Today's Calls", "callback_data": "nav_schedule|today"},
+            {"text": "📅 Tomorrow", "callback_data": "nav_schedule|tomorrow"}
+        ],
+        [
+            {"text": "📸 Today's Shoots", "callback_data": "nav_today|none"}
+        ]
+    ]
+    send_msg(chat_id, text, {"inline_keyboard": buttons})
+
+
+def handle_leads_command(chat_id):
+    rows, col = read_sheet_with_headers("Leads!A1:T200")
+    if not rows:
+        return send_msg(chat_id, "📭 No leads found.")
+
+    lines = ["📋 *LEADS OVERVIEW* (latest 10)\n"]
+    buttons = []
+    for row in rows[:10]:
+        name = safe_get(row, col, "Full_Name")
+        lid = safe_get(row, col, "Lead_ID")
+        status = safe_get(row, col, "Lead_Status")
+        emoji = STATUS_EMOJI.get(status.upper(), "⚪")
+        lines.append(f"• {emoji} *{name}* (`{lid}`) — {status}")
+        buttons.append([{"text": f"{emoji} {name}", "callback_data": f"view_lead|{lid}"}])
+
+    buttons.append([
+        {"text": "🔴 HOT Only", "callback_data": "nav_hot|none"},
+        {"text": "📊 Pipeline", "callback_data": "nav_pipe|none"}
+    ])
+    send_msg(chat_id, "\n".join(lines), {"inline_keyboard": buttons})
+
+
+def handle_hot_command(chat_id):
+    rows, col = read_sheet_with_headers("Leads!A1:T200")
+    hot_rows = [r for r in rows if safe_get(r, col, "Lead_Status").upper() == "HOT"]
+    if not hot_rows:
+        return send_msg(chat_id, "🔴 No HOT leads right now.")
+
+    lines = [f"🔴 *HOT LEADS* ({len(hot_rows)} total)\n"]
+    buttons = []
+    for row in hot_rows[:10]:
+        name = safe_get(row, col, "Full_Name")
+        lid = safe_get(row, col, "Lead_ID")
+        event = safe_get(row, col, "Event_Type")
+        date = safe_get(row, col, "Event_Date")
+        lines.append(f"• 🔴 *{name}* (`{lid}`)\n └ {event} on {date}")
+        buttons.append([{"text": f"🔴 {name}", "callback_data": f"view_lead|{lid}"}])
+
+    buttons.append([{"text": "⬅️ All Leads", "callback_data": "nav_leads|none"}])
+    send_msg(chat_id, "\n".join(lines), {"inline_keyboard": buttons})
+
+
+def handle_today_command(chat_id):
+    today_str = ph_now().strftime("%Y-%m-%d")
+    today_display = ph_now().strftime("%B %d, %Y")
+    rows, col = read_sheet_with_headers("Leads!A1:T200")
+    today_rows = [r for r in rows if today_str in safe_get(r, col, "Event_Date")]
+
+    lines = [f"📸 *TODAY'S SHOOTS* — {today_display}\n"]
+    buttons = []
+
+    if today_rows:
+        for row in today_rows:
+            name = safe_get(row, col, "Full_Name")
+            lid = safe_get(row, col, "Lead_ID")
+            event = safe_get(row, col, "Event_Type")
+            lines.append(f"• 📸 *{name}* — {event}\n ID: `{lid}`")
+            buttons.append([{"text": f"📸 {name}", "callback_data": f"view_lead|{lid}"}])
+    else:
+        lines.append("No shoots scheduled for today.")
+
+    buttons.append([
+        {"text": "📅 Today's Calls", "callback_data": "nav_schedule|today"},
+        {"text": "⬅️ All Leads", "callback_data": "nav_leads|none"}
+    ])
+    send_msg(chat_id, "\n".join(lines), {"inline_keyboard": buttons})
+
+
+def handle_schedule_command(chat_id, date_str=None, date_label=None):
+    now = ph_now()
+    if not date_str:
+        date_str = now.strftime("%Y-%m-%d")
+        date_label = now.strftime("%B %d, %Y")
+
+    bookings_raw = fetch_cal_bookings(date_str)
+    bookings = [
+        parse_cal_booking(b) for b in bookings_raw
+        if b.get("status", "").upper() in ("ACCEPTED", "UPCOMING", "PENDING", "BOOKED")
+    ]
+
+    lines = [f"📅 *DISCOVERY CALLS — {date_label}*\n"]
+    buttons = []
+
+    if bookings:
+        lines.append(f"_{len(bookings)} call(s) scheduled_\n")
+        for b in bookings:
+            lead_id = b["lead_id"]
+            lines.append(
+                f"🕐 *{b['time']}* — {b['client_name']}\n"
+                f" └ Lead: `{lead_id}` | {b['client_email']}"
+            )
+            row_buttons = []
+            if lead_id and lead_id != "—":
+                row_buttons.append({
+                    "text": f"👤 {b['client_name']}",
+                    "callback_data": f"view_lead|{lead_id}"
+                })
+            if b["meeting_url"] and b["meeting_url"] != "—":
+                row_buttons.append({
+                    "text": "🔗 Join Call",
+                    "url": b["meeting_url"]
+                })
+            if row_buttons:
+                buttons.append(row_buttons)
+            if lead_id and lead_id != "—":
+                buttons.append([{
+                    "text": "📞 Log Call Outcome",
+                    "callback_data": f"call_menu|{lead_id}"
+                }])
+    else:
+        lines.append("No discovery calls scheduled.")
+
+    today_str = now.strftime("%Y-%m-%d")
+    if date_str == today_str:
+        buttons.append([
+            {"text": "➡️ Tomorrow", "callback_data": "nav_schedule|tomorrow"},
+            {"text": "📸 Today's Shoots", "callback_data": "nav_today|none"}
+        ])
+    else:
+        buttons.append([
+            {"text": "⬅️ Today", "callback_data": "nav_schedule|today"},
+            {"text": "📋 All Leads", "callback_data": "nav_leads|none"}
+        ])
+
+    send_msg(chat_id, "\n".join(lines), {"inline_keyboard": buttons})
+
+
+def handle_tomorrow_command(chat_id):
+    tomorrow = ph_now() + timedelta(days=1)
+    tomorrow_str = tomorrow.strftime("%Y-%m-%d")
+    tomorrow_lbl = tomorrow.strftime("%B %d, %Y")
+    handle_schedule_command(
+        chat_id,
+        date_str=tomorrow_str,
+        date_label=f"Tomorrow — {tomorrow_lbl}"
+    )
+
+
+def handle_search_command(chat_id, query):
+    if not query:
+        return send_msg(chat_id, "🔍 Usage: `/search <name or email>`")
+
+    query_lower = query.lower()
+    rows, col = read_sheet_with_headers("Leads!A1:T200")
+    matches = [
+        r for r in rows
+        if query_lower in safe_get(r, col, "Full_Name").lower()
+        or query_lower in safe_get(r, col, "Email").lower()
+    ]
+
+    if not matches:
+        return send_msg(chat_id, f"🔍 No results found for: *{query}*")
+
+    lines = [f"🔍 *Search Results for \"{query}\"* ({len(matches)} found)\n"]
+    buttons = []
+    for row in matches[:10]:
+        name = safe_get(row, col, "Full_Name")
+        lid = safe_get(row, col, "Lead_ID")
+        email = safe_get(row, col, "Email")
+        status = safe_get(row, col, "Lead_Status")
+        emoji = STATUS_EMOJI.get(status.upper(), "⚪")
+        lines.append(f"• {emoji} *{name}* (`{lid}`)\n └ {email}")
+        buttons.append([{"text": f"{emoji} {name}", "callback_data": f"view_lead|{lid}"}])
+
+    buttons.append([{"text": "⬅️ All Leads", "callback_data": "nav_leads|none"}])
+    send_msg(chat_id, "\n".join(lines), {"inline_keyboard": buttons})
+
+
+def handle_pipeline_command(chat_id):
+    rows, col = read_sheet_with_headers("Pipeline Tracker!A1:L200")
+    if not rows:
+        return send_msg(chat_id, "📭 Pipeline is empty.")
+
+    lines = ["📊 *PIPELINE SNAPSHOT*\n"]
+    buttons = []
+    for row in rows[:10]:
+        client = safe_get(row, col, "Client_Name")
+        lid = safe_get(row, col, "Lead_ID")
+        stage = safe_get(row, col, "Current_Stage")
+        next_a = safe_get(row, col, "Next_Action")
+        lines.append(f"• *{client}* (`{lid}`)\n └ {stage} → _{next_a}_")
+        buttons.append([{"text": f"📊 {client}", "callback_data": f"view_pipe|{lid}"}])
+
+    buttons.append([
+        {"text": "📋 All Leads", "callback_data": "nav_leads|none"},
+        {"text": "🗂 Projects", "callback_data": "nav_projects|none"}
+    ])
+    send_msg(chat_id, "\n".join(lines), {"inline_keyboard": buttons})
+
+
+def handle_project_command(chat_id):
+    rows, col = read_sheet_with_headers("Projects!A1:V200")
+    if not rows:
+        return send_msg(chat_id, "📭 No projects found.")
+
+    active = [r for r in rows if safe_get(r, col, "Current_Stage") not in ("Closed", "Completed")]
+    lines = [f"🗂 *ACTIVE PROJECTS* ({len(active)} total)\n"]
+    buttons = []
+
+    for row in active[:10]:
+        pid = safe_get(row, col, "Project_ID")
+        client = safe_get(row, col, "Client_Name")
+        stage = safe_get(row, col, "Current_Stage")
+        edate = safe_get(row, col, "Event_Date")
+        lid = safe_get(row, col, "Lead_ID")
+        lines.append(f"• 🗂 *{client}* (`{pid}`)\n └ {stage} | Event: {edate}")
+        buttons.append([{"text": f"🗂 {client}", "callback_data": f"view_project|{lid}"}])
+
+    if not active:
+        lines.append("No active projects at the moment.")
+
+    buttons.append([{"text": "📊 Pipeline", "callback_data": "nav_pipe|none"}])
+    send_msg(chat_id, "\n".join(lines), {"inline_keyboard": buttons})
+
+
+def handle_client_command(chat_id, client_id):
+    if not client_id:
+        return send_msg(chat_id, "👤 Usage: `/client <Client_ID>`\nExample: `/client C-1234567890`")
+    _show_client(chat_id, None, client_id, method="send")
 
 # ─────────────────────────────────────────────
-# MAIN WEBHOOK ROUTE
+# VIEW HANDLERS (Lead, Pipeline, Project, Client, Call Menu)
+# ─────────────────────────────────────────────
+
+def _show_lead(chat_id, msg_id, target_id, method="edit"):
+    rows, col = read_sheet_with_headers("Leads!A1:T200")
+    row = next((r for r in rows if safe_get(r, col, "Lead_ID") == target_id), None)
+    if not row:
+        return send_msg(chat_id, f"❌ Lead `{target_id}` not found.")
+
+    status = safe_get(row, col, "Lead_Status")
+    emoji = STATUS_EMOJI.get(status.upper(), "⚪")
+
+    text = (
+        f"👤 *{safe_get(row, col, 'Full_Name')}*\n"
+        f"ID: `{target_id}` | {emoji} {status}\n\n"
+        f"📅 Event: {safe_get(row, col, 'Event_Type')} — {safe_get(row, col, 'Event_Date')}\n"
+        f"📍 Venue: {safe_get(row, col, 'Venue')}\n"
+        f"👥 Guests: {safe_get(row, col, 'Guest_Count')}\n"
+        f"💰 Budget: {safe_get(row, col, 'Budget')}\n"
+        f"📦 Package: {safe_get(row, col, 'Primary_Package')}\n"
+        f"📱 Phone: {safe_get(row, col, 'Phone')}\n"
+        f"✉️ Email: {safe_get(row, col, 'Email')}\n\n"
+        f"🧠 *AI Summary:*\n{safe_get(row, col, 'AI_Summary')}\n\n"
+        f"✅ *Recommended:* {safe_get(row, col, 'Recommended_Action')}"
+    )
+
+    client_id = safe_get(row, col, "Client_ID") if "Client_ID" in col else None
+
+    buttons = [
+        [
+            {"text": "🔴 HOT", "callback_data": f"upd_lead|{target_id}|HOT"},
+            {"text": "🟡 WARM", "callback_data": f"upd_lead|{target_id}|WARM"},
+            {"text": "🔵 COLD", "callback_data": f"upd_lead|{target_id}|COLD"}
+        ],
+        [
+            {"text": "📞 Call Outcome", "callback_data": f"call_menu|{target_id}"},
+            {"text": "📋 Pipeline", "callback_data": f"view_pipe|{target_id}"}
+        ],
+        [
+            {"text": "🗂 Project", "callback_data": f"view_project|{target_id}"},
+            {"text": "👤 Client", "callback_data": f"view_client|{client_id}"}
+        ],
+        [{"text": "⬅️ Back to Leads", "callback_data": "nav_leads|none"}]
+    ]
+
+    markup = {"inline_keyboard": buttons}
+    if method == "edit" and msg_id:
+        edit_msg(chat_id, msg_id, text, markup)
+    else:
+        send_msg(chat_id, text, markup)
+
+
+def _show_pipeline(chat_id, msg_id, target_id, method="edit"):
+    rows, col = read_sheet_with_headers("Pipeline Tracker!A1:L200")
+    row = next((r for r in rows if safe_get(r, col, "Lead_ID") == target_id), None)
+    if not row:
+        return send_msg(chat_id, f"❌ Pipeline entry for `{target_id}` not found.")
+
+    curr_stage = safe_get(row, col, "Current_Stage")
+    text = (
+        f"📊 *Pipeline: {safe_get(row, col, 'Client_Name')}*\n"
+        f"Lead ID: `{target_id}`\n"
+        f"Project ID: `{safe_get(row, col, 'Project_ID')}`\n\n"
+        f"📍 Current Stage: *{curr_stage}*\n"
+        f"🕐 Last Action: {safe_get(row, col, 'Last_Action')}\n"
+        f"➡️ Next Action: {safe_get(row, col, 'Next_Action')}\n"
+        f"📅 Due: {safe_get(row, col, 'Next_Action_Date')}\n"
+        f"📞 Call Status: {safe_get(row, col, 'Call_Status')}\n"
+        f"📝 Proposal: {safe_get(row, col, 'Proposal_Status')}"
+    )
+
+    curr_idx = PIPELINE_STAGES.index(curr_stage) if curr_stage in PIPELINE_STAGES else -1
+    next_stages = PIPELINE_STAGES[curr_idx + 1: curr_idx + 4]
+
+    buttons = [[{"text": f"➡️ {s}", "callback_data": f"upd_pipe|{target_id}|{s}"}] for s in next_stages]
+
+    # Dynamic action buttons
+    action_row = []
+    if curr_stage == "Discovery Call Booked":
+        action_row = [{"text": "📞 Call Outcome", "callback_data": f"call_menu|{target_id}"}]
+    elif curr_stage == "Discovery Call Completed":
+        action_row = [{"text": "📄 Send Proposal", "callback_data": f"send_proposal|{target_id}"}]
+    elif curr_stage == "Proposal Sent":
+        action_row = [{"text": "📝 Send Contract", "callback_data": f"send_contract|{target_id}"}]
+    elif curr_stage == "Contracted":
+        action_row = [{"text": "💰 Mark Deposit Paid", "callback_data": f"deposit_paid|{target_id}"}]
+    elif curr_stage == "Active Project":
+        action_row = [{"text": "🖼️ Deliver Gallery", "callback_data": f"deliver_gallery|{target_id}"}]
+
+    if action_row:
+        buttons.append(action_row)
+
+    buttons.append([
+        {"text": "👤 View Lead", "callback_data": f"view_lead|{target_id}"},
+        {"text": "🗂 Project", "callback_data": f"view_project|{target_id}"}
+    ])
+    buttons.append([{"text": "⬅️ Back to Pipeline", "callback_data": "nav_pipe|none"}])
+
+    markup = {"inline_keyboard": buttons}
+    if method == "edit" and msg_id:
+        edit_msg(chat_id, msg_id, text, markup)
+    else:
+        send_msg(chat_id, text, markup)
+
+
+def _show_project(chat_id, msg_id, lead_id, method="edit"):
+    rows, col = read_sheet_with_headers("Projects!A1:V200")
+    row = next((r for r in rows if safe_get(r, col, "Lead_ID") == lead_id), None)
+    if not row:
+        return send_msg(chat_id, f"❌ No project found for Lead `{lead_id}`.")
+
+    curr_stage = safe_get(row, col, "Current_Stage")
+    text = (
+        f"🗂 *Project: {safe_get(row, col, 'Client_Name')}*\n"
+        f"Project ID: `{safe_get(row, col, 'Project_ID')}`\n"
+        f"Lead ID: `{lead_id}`\n\n"
+        f"📅 Event Date: {safe_get(row, col, 'Event_Date')}\n"
+        f"📦 Package: {safe_get(row, col, 'Package')}\n"
+        f"💰 Total: {safe_get(row, col, 'Total_Price')}\n"
+        f"💵 Deposit: {safe_get(row, col, 'Deposit')} | Paid: {safe_get(row, col, 'Deposit_Paid')}\n"
+        f"📊 Balance: {safe_get(row, col, 'Balance')}\n\n"
+        f"📍 Stage: *{curr_stage}*\n"
+        f"📝 Contract: {safe_get(row, col, 'Contract_Sent')} ({safe_get(row, col, 'Contract_Date')})\n"
+        f"🖼️ Gallery: {safe_get(row, col, 'Gallery_Folder_URL')}\n"
+        f"📦 Delivered: {safe_get(row, col, 'Delivery_Date')}\n"
+        f"⭐ Review: {safe_get(row, col, 'Review')}"
+    )
+
+    curr_idx = PROJECT_STAGES.index(curr_stage) if curr_stage in PROJECT_STAGES else -1
+    next_stages = PROJECT_STAGES[curr_idx + 1: curr_idx + 3]
+
+    buttons = [[{"text": f"➡️ {s}", "callback_data": f"upd_proj|{lead_id}|{s}"}] for s in next_stages]
+    buttons.append([
+        {"text": "👤 View Lead", "callback_data": f"view_lead|{lead_id}"},
+        {"text": "📊 Pipeline", "callback_data": f"view_pipe|{lead_id}"}
+    ])
+    buttons.append([{"text": "⬅️ Projects List", "callback_data": "nav_projects|none"}])
+
+    markup = {"inline_keyboard": buttons}
+    if method == "edit" and msg_id:
+        edit_msg(chat_id, msg_id, text, markup)
+    else:
+        send_msg(chat_id, text, markup)
+
+
+def _show_client(chat_id, msg_id, client_id, method="send"):
+    rows, col = read_sheet_with_headers("Clients!A1:H200")
+    row = next((r for r in rows if safe_get(r, col, "Client_ID") == client_id), None)
+    if not row:
+        return send_msg(chat_id, f"❌ Client `{client_id}` not found.")
+
+    tier = safe_get(row, col, "Client_Tier")
+    tier_emoji = {"VIP": "⭐", "Premium": "💎", "Standard": "🔹"}.get(tier, "👤")
+
+    text = (
+        f"{tier_emoji} *Client: {safe_get(row, col, 'Name')}*\n"
+        f"ID: `{client_id}` | Tier: {tier}\n\n"
+        f"✉️ Email: {safe_get(row, col, 'Email')}\n"
+        f"📱 Phone: {safe_get(row, col, 'Phone')}\n"
+        f"📅 Since: {safe_get(row, col, 'Created_At')}\n\n"
+        f"📊 *Lifetime Stats:*\n"
+        f" 📸 Bookings: {safe_get(row, col, 'Bookings')}\n"
+        f" 💰 LTV: {safe_get(row, col, 'LTV')}"
+    )
+
+    # Show related leads
+    lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
+    client_leads = [r for r in lead_rows if safe_get(r, lead_col, "Client_ID") == client_id]
+
+    buttons = []
+    if client_leads:
+        text += f"\n\n📋 *Leads ({len(client_leads)}):*"
+        for lr in client_leads[:5]:
+            lid = safe_get(lr, lead_col, "Lead_ID")
+            etype = safe_get(lr, lead_col, "Event_Type")
+            status = safe_get(lr, lead_col, "Lead_Status")
+            emoji = STATUS_EMOJI.get(status.upper(), "⚪")
+            text += f"\n • {emoji} `{lid}` — {etype}"
+            buttons.append([{"text": f"{emoji} {etype} ({lid})", "callback_data": f"view_lead|{lid}"}])
+
+    buttons.append([{"text": "⬅️ Back", "callback_data": "nav_leads|none"}])
+    markup = {"inline_keyboard": buttons}
+
+    if method == "edit" and msg_id:
+        edit_msg(chat_id, msg_id, text, markup)
+    else:
+        send_msg(chat_id, text, markup)
+
+
+def _show_call_menu(chat_id, msg_id, lead_id):
+    rows, col = read_sheet_with_headers("Leads!A1:T200")
+    row = next((r for r in rows if safe_get(r, col, "Lead_ID") == lead_id), None)
+    name = safe_get(row, col, "Full_Name") if row else lead_id
+
+    text = f"📞 *Call Outcome — {name}*\nLead: `{lead_id}`\n\nWhat was the result of the discovery call?"
+
+    buttons = [
+        [{"text": "✅ Completed — Continue", "callback_data": f"call_out|{lead_id}|completed_continue"}],
+        [{"text": "🛑 Completed — Not a Fit", "callback_data": f"call_out|{lead_id}|completed_stop"}],
+        [{"text": "❌ No Show", "callback_data": f"call_out|{lead_id}|no_show"}],
+        [{"text": "🔄 Reschedule", "callback_data": f"call_out|{lead_id}|reschedule"}],
+        [{"text": "⬅️ Back to Lead", "callback_data": f"view_lead|{lead_id}"}]
+    ]
+
+    edit_msg(chat_id, msg_id, text, {"inline_keyboard": buttons})
+
+# ─────────────────────────────────────────────
+# MAIN DASHBOARD WEBHOOK
 # ─────────────────────────────────────────────
 
 @app.route("/dashboard", methods=["POST"])
 def dashboard():
     data = request.json
 
-    # Handle regular messages
+    # Handle text commands
     if "message" in data:
         msg = data["message"]
         text = msg.get("text", "").strip()
@@ -309,17 +763,16 @@ def dashboard():
         elif text == "/project":
             handle_project_command(chat_id)
         elif text.startswith("/search"):
-            query = text[len("/search "):].strip()
+            query = text[len("/search"):].strip()
             handle_search_command(chat_id, query)
         elif text.startswith("/client"):
-            cid = text[len("/client "):].strip()
+            cid = text[len("/client"):].strip()
             handle_client_command(chat_id, cid)
         else:
             send_msg(chat_id, "❓ Unknown command. Type /help to see all commands.")
-
         return jsonify({"status": "ok"})
 
-    # Handle callback queries (inline buttons)
+    # Handle callback queries
     if "callback_query" not in data:
         return jsonify({"status": "ignored"})
 
@@ -327,12 +780,10 @@ def dashboard():
     chat_id = cb["message"]["chat"]["id"]
     msg_id = cb["message"]["message_id"]
     cb_data = cb["data"]
-
     parts = cb_data.split("|")
     action = parts[0]
     target_id = parts[1] if len(parts) > 1 else None
 
-    # Route callbacks to appropriate handlers
     if action == "view_lead":
         _show_lead(chat_id, msg_id, target_id)
     elif action == "view_pipe":
@@ -343,7 +794,29 @@ def dashboard():
         _show_client(chat_id, msg_id, target_id, method="edit")
     elif action == "call_menu":
         _show_call_menu(chat_id, msg_id, target_id)
-    # ... (all other callback actions: upd_lead, upd_pipe, call_out, send_proposal, etc.)
+    elif action == "upd_lead":
+        new_status = parts[2]
+        success = _write_back("Leads", "Leads!A1:T200", "Lead_ID", target_id, {"Lead_Status": new_status})
+        answer_callback(cb["id"], f"Status → {new_status} ✅" if success else "⚠️ Update failed")
+        _show_lead(chat_id, msg_id, target_id)
+    elif action == "upd_pipe":
+        new_stage = parts[2]
+        today_str = ph_now().strftime("%Y-%m-%d")
+        success = _write_back(
+            "Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", target_id,
+            {"Current_Stage": new_stage, "Last_Action": f"Stage moved to {new_stage}", "Next_Action_Date": today_str}
+        )
+        answer_callback(cb["id"], f"Stage → {new_stage} ✅" if success else "⚠️ Update failed")
+        _show_pipeline(chat_id, msg_id, target_id)
+    elif action == "upd_proj":
+        new_stage = parts[2]
+        success = _write_back("Projects", "Projects!A1:V200", "Lead_ID", target_id, {"Current_Stage": new_stage})
+        answer_callback(cb["id"], f"Project → {new_stage} ✅" if success else "⚠️ Update failed")
+        _show_project(chat_id, msg_id, target_id)
+    elif action == "call_out":
+        # ... (your full call_out logic - let me know if you want me to expand the rest)
+        pass
+    # Add the rest of your callback handlers (send_proposal, send_contract, deposit_paid, deliver_gallery, nav_*) here
 
     return jsonify({"status": "ok"})
 
@@ -354,31 +827,23 @@ def dashboard():
 
 @app.route("/notify", methods=["POST"])
 def notify():
-    """Receive notification from Zapier and forward via Client Bot"""
     body = request.json
     message = body.get("message", "")
     if message and BOT_TOKEN and CHAT_ID:
-        requests.post(f"{CLIENT_API}/sendMessage", json={
-            "chat_id": CHAT_ID,
-            "text": message
-        })
+        requests.post(f"{CLIENT_API}/sendMessage", json={"chat_id": CHAT_ID, "text": message})
     return jsonify({"status": "sent"})
 
 
 @app.route("/pipeline_notify", methods=["POST"])
 def pipeline_notify():
-    """Receive booking notification and send with call outcome buttons"""
     body = request.json
-    # ... (your existing logic - cleaned)
-    # (I can expand this if you want)
-
+    # Your existing pipeline notification logic here
     return jsonify({"status": "sent"})
 
 
 @app.route("/pipeline_dashboard", methods=["POST"])
 def pipeline_dashboard():
-    """Handle callbacks from Pipeline Tracker Bot"""
-    # ... your existing logic
+    # Your existing pipeline bot callback logic here
     return jsonify({"status": "ok"})
 
 
