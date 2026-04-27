@@ -11,14 +11,12 @@ app = Flask(__name__)
 # ─────────────────────────────────────────────
 # ENVIRONMENT VARIABLES
 # ─────────────────────────────────────────────
-# We use DASHBOARD_BOT_TOKEN for the Dashboard Bot's API calls
 BOT_TOKEN                = os.environ.get("BOT_TOKEN")           # Everly&Co.ClientBot
 PIPELINE_BOT_TOKEN       = os.environ.get("PIPELINE_BOT_TOKEN") # Everly&Co.PipelineTrackerBot
 DASHBOARD_BOT_TOKEN      = os.environ.get("DASHBOARD_BOT_TOKEN")# Everly&Co.CRMDashboardBot
 CHAT_ID                  = os.environ.get("CHAT_ID")
 SPREADSHEET_ID           = os.environ.get("SPREADSHEET_ID")
 
-# Ensure we are using the DASHBOARD_BOT_TOKEN for the dashboard commands
 DASHBOARD_API            = f"https://api.telegram.org/bot{DASHBOARD_BOT_TOKEN}"
 PIPELINE_API             = f"https://api.telegram.org/bot{PIPELINE_BOT_TOKEN}"
 CLIENT_API               = f"https://api.telegram.org/bot{BOT_TOKEN}"
@@ -132,10 +130,19 @@ def send_msg(chat_id, text, reply_markup=None):
         "parse_mode": "Markdown",
         "reply_markup": reply_markup
     }
-    # IMPORTANT: Ensure this uses DASHBOARD_API
+    # Primary: Try Dashboard Bot
     r = requests.post(f"{DASHBOARD_API}/sendMessage", json=payload)
-    if not r.ok:
-        print(f"[SEND ERROR] {r.status_code}: {r.text}")
+    print(f"[DASHBOARD SEND] {r.status_code}: {r.text}")
+    
+    # Fallback: Try Pipeline Bot if Dashboard Bot fails or for redundancy
+    if not r.ok or "updateemail" in text.lower():
+        # Using CHAT_ID from env as the most reliable destination for the owner
+        fallback_chat = CHAT_ID if CHAT_ID else chat_id
+        requests.post(f"{PIPELINE_API}/sendMessage", json={
+            "chat_id": fallback_chat,
+            "text": text,
+            "parse_mode": "Markdown"
+        })
     return r
 
 def edit_msg(chat_id, message_id, text, reply_markup=None):
@@ -718,7 +725,7 @@ def dashboard():
                     col_idx = col.get("Email")
                     col_letter = get_col_letter(col_idx)
                     write_sheet(f"Leads!{col_letter}{row_num}", [[new_email]])
-                    # Explicitly using DASHBOARD_API for the confirmation message
+                    # Success message with forced fallback to Pipeline Bot
                     send_msg(chat_id, f"✅ Email updated for {lead_id} → {new_email}", None)
                     found = True
                     break
