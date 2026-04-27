@@ -127,7 +127,10 @@ def send_msg(chat_id, text, reply_markup=None):
         "parse_mode": "Markdown",
         "reply_markup": reply_markup
     }
-    requests.post(f"{DASHBOARD_API}/sendMessage", json=payload)
+    r = requests.post(f"{DASHBOARD_API}/sendMessage", json=payload)
+    if not r.ok:
+        print(f"[SEND ERROR] {r.status_code}: {r.text}")
+    return r
 
 def edit_msg(chat_id, message_id, text, reply_markup=None):
     payload = {
@@ -702,15 +705,19 @@ def dashboard():
                 return jsonify({"status": "ok"})
             lead_id, new_email = parts[1], parts[2]
             rows, col = read_sheet_with_headers("Leads")
+            found = False
             for i, row in enumerate(rows):
                 if safe_get(row, col, "Lead_ID") == lead_id:
                     row_num = i + 2
                     col_idx = col.get("Email")
                     col_letter = get_col_letter(col_idx)
                     write_sheet(f"Leads!{col_letter}{row_num}", [[new_email]])
+                    # Use the incoming chat_id for confirmation
                     send_msg(chat_id, f"✅ Email updated for {lead_id} → {new_email}", None)
-                    return jsonify({"status": "ok"})
-            send_msg(chat_id, f"❌ Lead {lead_id} not found.", None)
+                    found = True
+                    break
+            if not found:
+                send_msg(chat_id, f"❌ Lead {lead_id} not found.", None)
         else:
             send_msg(chat_id, "❓ Unknown command. Type /help to see all commands.")
 
