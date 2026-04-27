@@ -16,9 +16,11 @@ PIPELINE_BOT_TOKEN = os.environ.get("PIPELINE_BOT_TOKEN")  # Everly&Co.PipelineT
 DASHBOARD_BOT_TOKEN = os.environ.get("DASHBOARD_BOT_TOKEN")  # Everly&Co.CRMDashboardBot
 CHAT_ID = os.environ.get("CHAT_ID")
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID")
+
 DASHBOARD_API = f"https://api.telegram.org/bot{DASHBOARD_BOT_TOKEN}"
 PIPELINE_API = f"https://api.telegram.org/bot{PIPELINE_BOT_TOKEN}"
 CLIENT_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 CAL_API_KEY = os.environ.get("CAL_API_KEY")
 CAL_EVENT_TYPE_ID = os.environ.get("CAL_EVENT_TYPE_ID")
@@ -110,10 +112,10 @@ def fire_webhook(url, payload):
         return False
 
 # ─────────────────────────────────────────────
-# TELEGRAM SEND/EDIT HELPERS
+# TELEGRAM SEND/EDIT HELPERS - FIXED
 # ─────────────────────────────────────────────
 def send_msg(chat_id, text, reply_markup=None):
-    """Primary: Send using CRM Dashboard Bot only"""
+    """Always send using CRM Dashboard Bot first. No forced fallback for updateemail."""
     payload = {
         "chat_id": chat_id,
         "text": text,
@@ -121,7 +123,7 @@ def send_msg(chat_id, text, reply_markup=None):
         "reply_markup": reply_markup
     }
     r = requests.post(f"{DASHBOARD_API}/sendMessage", json=payload)
-    print(f"[DASHBOARD SEND] {r.status_code}: {r.text}")
+    print(f"[DASHBOARD SEND] {r.status_code}: {r.text[:300]}")
     return r
 
 def edit_msg(chat_id, message_id, text, reply_markup=None):
@@ -135,7 +137,7 @@ def edit_msg(chat_id, message_id, text, reply_markup=None):
     requests.post(f"{DASHBOARD_API}/editMessageText", json=payload)
 
 def send_pipeline_msg(chat_id, text, reply_markup=None):
-    """Only use for Pipeline Tracker Bot when needed"""
+    """Only use this when you intentionally want to send via Pipeline Tracker Bot"""
     payload = {
         "chat_id": chat_id,
         "text": text,
@@ -145,7 +147,6 @@ def send_pipeline_msg(chat_id, text, reply_markup=None):
     requests.post(f"{PIPELINE_API}/sendMessage", json=payload)
 
 def send_client_msg(chat_id, text):
-    """Send via Client Bot"""
     requests.post(f"{CLIENT_API}/sendMessage", json={
         "chat_id": chat_id,
         "text": text
@@ -231,11 +232,7 @@ def handle_help_command(chat_id):
         "`/today` — Today's photography shoots\n\n"
         "👤 *Clients & Projects*\n"
         "`/client <ID>` — Full client card with LTV and booking history\n"
-        "`/project` — All active projects and their current stage\n\n"
-        "💡 *Tips*\n"
-        "• Tap any lead or client button to drill in\n"
-        "• Update lead status (HOT/WARM/COLD) from the lead card\n"
-        "• Log call outcomes right after a discovery call"
+        "`/project` — All active projects and their current stage"
     )
     send_msg(chat_id, text)
 
@@ -377,8 +374,8 @@ def handle_tomorrow_command(chat_id):
     tomorrow_lbl = tomorrow.strftime("%B %d, %Y")
     handle_schedule_command(
         chat_id,
-        date_str = tomorrow_str,
-        date_label = f"Tomorrow — {tomorrow_lbl}"
+        date_str=tomorrow_str,
+        date_label=f"Tomorrow — {tomorrow_lbl}"
     )
 
 def handle_search_command(chat_id, query):
@@ -683,7 +680,7 @@ def dashboard():
             cid = text[len("/client"):].strip()
             handle_client_command(chat_id, cid)
         elif text.startswith("/updateemail"):
-            # FIXED: Notification stays in CRM Dashboard Bot only
+            # FIXED: Always uses send_msg() → CRM Dashboard Bot only
             parts = text.split()
             if len(parts) != 3:
                 send_msg(chat_id, "Usage: /updateemail <Lead_ID> <new_email>", None)
