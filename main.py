@@ -550,7 +550,7 @@ def _show_pipeline(chat_id, msg_id, target_id, method="edit"):
     elif curr_stage == "Discovery Call Completed":
         action_row = [{"text": "📄 Send Proposal",     "callback_data": f"send_proposal|{target_id}"}]
     elif curr_stage == "Proposal Sent":
-        action_row = [{"text": "📝 Send Contract",     "callback_data": f"send_contract|{target_id}"}]
+        action_row = [{"text": "📝 Send Contract",     "callback_data": f"confirm_contract|{target_id}"}]
     elif curr_stage == "Contracted":
         action_row = [{"text": "💰 Mark Deposit Paid", "callback_data": f"deposit_paid|{target_id}"}]
     elif curr_stage == "Active Project":
@@ -689,6 +689,40 @@ def _confirm_call_out(chat_id, msg_id, lead_id, outcome, use_pipeline_edit=False
     else:
         edit_msg(chat_id, msg_id, text, markup)
 
+def _confirm_contract(chat_id, msg_id, lead_id):
+    """Shows a two-option confirmation before firing System 3A or closing the lead."""
+    rows, col = read_sheet_with_headers("Leads!A1:T200")
+    row  = next((r for r in rows if safe_get(r, col, "Lead_ID") == lead_id), None)
+    name = safe_get(row, col, "Full_Name") if row else lead_id
+    pkg  = safe_get(row, col, "Primary_Package") if row else "—"
+
+    pipe_rows, pipe_col = read_sheet_with_headers("Pipeline Tracker!A1:L200")
+    pipe_row   = next((r for r in pipe_rows if safe_get(r, pipe_col, "Lead_ID") == lead_id), None)
+    project_id = safe_get(pipe_row, pipe_col, "Project_ID") if pipe_row else "—"
+
+    text = (
+        f"📝 *Contract Decision — {name}*\n"
+        f"Lead: `{lead_id}` | Project: `{project_id}`\n"
+        f"Package: {pkg}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Did the client confirm the proposal and is ready to sign?\n\n"
+        f"✅ *YES — Send Contract*\n"
+        f"  Fires System 3A:\n"
+        f"  • SignNow contract → client inbox\n"
+        f"  • Pipeline updated → Contract Sent\n"
+        f"  • Projects sheet updated\n"
+        f"  • Telegram confirmation\n\n"
+        f"❌ *NO — Close Lead*\n"
+        f"  • Pipeline Tracker → Closed Lost\n"
+        f"  • Lead archived automatically"
+    )
+    buttons = [
+        [{"text": "✅ Yes — Send Contract & Fire System 3A", "callback_data": f"contract_yes|{lead_id}"}],
+        [{"text": "❌ No — Close Lead",                      "callback_data": f"contract_no|{lead_id}"}],
+        [{"text": "🔙 Back to Pipeline",                     "callback_data": f"view_pipe|{lead_id}"}]
+    ]
+    edit_msg(chat_id, msg_id, text, {"inline_keyboard": buttons})
+
 def _execute_call_out(chat_id, msg_id, target_id, outcome, cb_id, use_pipeline=False):
     today_str = ph_now().strftime("%Y-%m-%d")
     mapping   = OUTCOME_MAP.get(outcome, {})
@@ -807,6 +841,45 @@ def handle_callbacks(data, use_pipeline=False):
             send_msg(chat_id, f"📝 Contract triggered for `{target_id}`\nClient will receive SignNow email shortly.")
         else:
             send_msg(chat_id, f"⚠️ Webhook failed — check CONTRACT_ZAPIER_WEBHOOK in Railway.")
+    elif action == "confirm_contract":
+        _confirm_contract(chat_id, msg_id, target_id)
+    elif action == "contract_yes":
+        fired = fire_webhook(CONTRACT_ZAPIER_WEBHOOK, {"lead_id": target_id})
+        answer_callback(cb["id"], "✅ Contract triggered — System 3A firing")
+        if fired:
+            edit_msg(chat_id, msg_id,
+                f"✅ *Contract Sent — System 3A Triggered*\n"
+                f"Lead: `{target_id}`\n\n"
+                f"• SignNow email will arrive in client's inbox shortly\n"
+                f"• Pipeline Tracker will auto-update → Contract Sent\n"
+                f"• Watch Telegram for confirmation"
+            )
+        else:
+            edit_msg(chat_id, msg_id,
+                f"⚠️ *Webhook failed for `{target_id}`*\n"
+                f"Check CONTRACT_ZAPIER_WEBHOOK in Railway and retry."
+            )
+    elif action == "contract_no":
+        today_str = ph_now().strftime("%Y-%m-%d")
+        _write_back(
+            "Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", target_id,
+            {
+                "Current_Stage":    "Closed Lost",
+                "Last_Action":      "Closed — Client Did Not Confirm Proposal",
+                "Next_Action":      "Archive Lead",
+                "Next_Action_Date": today_str
+            }
+        )
+        answer_callback(cb["id"], "❌ Lead closed — Pipeline updated")
+        edit_msg(chat_id, msg_id,
+            f"❌ *Lead Closed — No Contract*\n"
+            f"Lead: `{target_id}`\n\n"
+            f"Pipeline Tracker updated:\n"
+            f"• Current Stage → Closed Lost\n"
+            f"• Last Action → Closed — Client Did Not Confirm Proposal\n"
+            f"• Date: {today_str}\n\n"
+            f"Lead has been archived."
+        )
     elif action == "deposit_paid":
         fired = fire_webhook(DEPOSIT_PAID_WEBHOOK, {"lead_id": target_id})
         if fired:
