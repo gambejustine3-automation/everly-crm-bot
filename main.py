@@ -52,6 +52,9 @@ PROJECT_STAGES = [
 ]
 STATUS_EMOJI = {"HOT": "🔴", "WARM": "🟡", "COLD": "🔵"}
 
+# Budgets that require Victoria to confirm the exact amount before firing System 3A
+UNCERTAIN_BUDGETS = {"$10,000+", "TBD", "10000+", "$10,000+ "}
+
 OUTCOME_LABELS = {
     "completed_continue":  "✅ Completed — moving to Proposal",
     "completed_stop":      "🛑 Closed as Not a Fit",
@@ -273,7 +276,8 @@ def handle_help_command(chat_id):
         "🛠 *Admin*\n"
         "`/resetleadcounter` — Reset lead ID counter to 0 (use before demos)\n"
         "`/deliver <Lead_ID> <drive_url>` — Trigger gallery delivery\n"
-        "`/retention <Lead_ID>` — Trigger post-delivery review + retention sequence\n\n"
+        "`/retention <Lead_ID>` — Trigger post-delivery review + retention sequence\n"
+        "`/setbudget <Lead_ID> <amount>` — Set confirmed budget for $10k+/TBD leads before contract\n\n"
         "💡 *Tips*\n"
         "• Tap any lead or client button to drill in\n"
         "• Update lead status (HOT/WARM/COLD) from the lead card\n"
@@ -849,27 +853,55 @@ def handle_callbacks(data, use_pipeline=False):
     elif action == "confirm_contract":
         _confirm_contract(chat_id, msg_id, target_id, use_pipeline=use_pipeline)
     elif action == "contract_yes":
-        fired = fire_webhook(CONTRACT_ZAPIER_WEBHOOK, {"lead_id": target_id})
-        # Answer the callback toast with the correct bot
-        api = PIPELINE_API if use_pipeline else DASHBOARD_API
-        requests.post(f"{api}/answerCallbackQuery", json={
-            "callback_query_id": cb["id"],
-            "text": "✅ Contract triggered — System 3A firing"
-        })
-        confirmed_text = (
-            f"✅ *Contract Sent — System 3A Triggered*\n"
-            f"Lead: `{target_id}`\n\n"
-            f"• SignNow email will arrive in client's inbox shortly\n"
-            f"• Pipeline Tracker will auto-update → Contract Sent\n"
-            f"• Watch Telegram for confirmation"
-        ) if fired else (
-            f"⚠️ *Webhook failed for `{target_id}`*\n"
-            f"Check CONTRACT_ZAPIER_WEBHOOK in Railway and retry."
-        )
-        if use_pipeline:
-            edit_pipeline_msg(chat_id, msg_id, confirmed_text)
+        # Check if budget is uncertain — requires Victoria to confirm exact amount first
+        lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
+        lead_row = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == target_id), None)
+        budget   = safe_get(lead_row, lead_col, "Budget").strip() if lead_row else ""
+        name     = safe_get(lead_row, lead_col, "Full_Name") if lead_row else target_id
+        api      = PIPELINE_API if use_pipeline else DASHBOARD_API
+
+        if budget in UNCERTAIN_BUDGETS:
+            # Budget unclear — ask Victoria to type the exact amount
+            requests.post(f"{api}/answerCallbackQuery", json={
+                "callback_query_id": cb["id"],
+                "text": "Budget unclear — enter exact amount below"
+            })
+            prompt_text = (
+                f"💰 *Budget Confirmation Required*\n"
+                f"Lead: `{target_id}` — {name}\n"
+                f"Budget on file: *{budget}*\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"Type the confirmed total contract amount in the chat:\n\n"
+                f"`/setbudget {target_id} <amount>`\n\n"
+                f"Example:\n"
+                f"`/setbudget {target_id} 13000`"
+            )
+            if use_pipeline:
+                edit_pipeline_msg(chat_id, msg_id, prompt_text)
+            else:
+                edit_msg(chat_id, msg_id, prompt_text)
+
         else:
-            edit_msg(chat_id, msg_id, confirmed_text)
+            # Budget is a known value — fire System 3A directly
+            fired = fire_webhook(CONTRACT_ZAPIER_WEBHOOK, {"lead_id": target_id})
+            requests.post(f"{api}/answerCallbackQuery", json={
+                "callback_query_id": cb["id"],
+                "text": "✅ Contract triggered — System 3A firing"
+            })
+            confirmed_text = (
+                f"✅ *Contract Triggered — System 3A*\n"
+                f"Lead: `{target_id}`\n\n"
+                f"• SignNow contract → client inbox shortly\n"
+                f"• Pipeline Tracker will auto-update → Contract Sent\n"
+                f"• Watch Telegram for confirmation"
+            ) if fired else (
+                f"⚠️ *Webhook failed for `{target_id}`*\n"
+                f"Check CONTRACT_ZAPIER_WEBHOOK in Railway and retry."
+            )
+            if use_pipeline:
+                edit_pipeline_msg(chat_id, msg_id, confirmed_text)
+            else:
+                edit_msg(chat_id, msg_id, confirmed_text)
     elif action == "contract_no":
         today_str = ph_now().strftime("%Y-%m-%d")
         _write_back(
@@ -899,7 +931,62 @@ def handle_callbacks(data, use_pipeline=False):
             edit_pipeline_msg(chat_id, msg_id, closed_text)
         else:
             edit_msg(chat_id, msg_id, closed_text)
-    elif action == "deposit_paid":
+    elif action == "budget_contract_yes":
+        # Victoria confirmed the exact amount — fire System 3A with calculated values
+        # callback_data format: budget_contract_yes|{lead_id}|{total_int}
+        api = PIPELINE_API if use_pipeline else DASHBOARD_API
+        try:
+            total   = int(parts[2])
+        except (IndexError, ValueError):
+            requests.post(f"{api}/answerCallbackQuery", json={
+                "callback_query_id": cb["id"], "text": "❌ Invalid amount — use /setbudget to retry"
+            })
+            return jsonify({"status": "ok"})
+        deposit = round(total * 0.30)
+        balance = total - deposit
+        fired = fire_webhook(CONTRACT_ZAPIER_WEBHOOK, {
+            "lead_id":     target_id,
+            "total_price": str(total),
+            "deposit":     str(deposit),
+            "balance":     str(balance)
+        })
+        requests.post(f"{api}/answerCallbackQuery", json={
+            "callback_query_id": cb["id"],
+            "text": "✅ System 3A fired with confirmed amounts"
+        })
+        confirmed_text = (
+            f"✅ *Contract Triggered — System 3A*\n"
+            f"Lead: `{target_id}`\n\n"
+            f"💵 Total:        *${total:,}*\n"
+            f"💳 Deposit 30%: *${deposit:,}*\n"
+            f"📊 Balance 70%: *${balance:,}*\n\n"
+            f"• SignNow contract → client inbox shortly\n"
+            f"• Watch Telegram for confirmation"
+        ) if fired else (
+            f"⚠️ *Webhook failed for `{target_id}`*\n"
+            f"Check CONTRACT_ZAPIER_WEBHOOK in Railway and retry."
+        )
+        if use_pipeline:
+            edit_pipeline_msg(chat_id, msg_id, confirmed_text)
+        else:
+            edit_msg(chat_id, msg_id, confirmed_text)
+    elif action == "budget_contract_edit":
+        # Victoria wants to re-enter the amount
+        api = PIPELINE_API if use_pipeline else DASHBOARD_API
+        requests.post(f"{api}/answerCallbackQuery", json={
+            "callback_query_id": cb["id"], "text": "Enter a new amount"
+        })
+        prompt_text = (
+            f"✏️ *Re-enter Budget Amount*\n"
+            f"Lead: `{target_id}`\n\n"
+            f"Type the corrected amount:\n"
+            f"`/setbudget {target_id} <amount>`\n\n"
+            f"Example:\n`/setbudget {target_id} 13000`"
+        )
+        if use_pipeline:
+            edit_pipeline_msg(chat_id, msg_id, prompt_text)
+        else:
+            edit_msg(chat_id, msg_id, prompt_text)
         fired = fire_webhook(DEPOSIT_PAID_WEBHOOK, {"lead_id": target_id})
         if fired:
             send_msg(chat_id, f"💰 Deposit marked as paid for `{target_id}`\nSheets updated. Confirmation email sent to client.")
@@ -1002,8 +1089,47 @@ def dashboard():
                 send_msg(chat_id, f"⭐ Retention sequence triggered for `{lead_id}`\nReview request email sent. Upsell follow-up queued.")
             else:
                 send_msg(chat_id, "⚠️ Webhook failed — check RETENTION_WEBHOOK in Railway.")
-        else:
-            send_msg(chat_id, "❓ Unknown command. Type /help to see all commands.")
+        elif text.startswith("/setbudget"):
+            parts = text.split(maxsplit=2)
+            if len(parts) != 3:
+                send_msg(chat_id,
+                    "💰 Usage: `/setbudget <Lead_ID> <amount>`\n"
+                    "Example: `/setbudget LED-0002 13000`"
+                )
+                return jsonify({"status": "ok"})
+            lead_id = parts[1]
+            try:
+                total = int(float(parts[2].replace("$", "").replace(",", "").strip()))
+            except ValueError:
+                send_msg(chat_id,
+                    "❌ Invalid amount — numbers only, no symbols.\n"
+                    "Example: `/setbudget LED-0002 13000`"
+                )
+                return jsonify({"status": "ok"})
+            deposit = round(total * 0.30)
+            balance = total - deposit
+            # Pull client name for confirmation display
+            lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
+            lead_row = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == lead_id), None)
+            name = safe_get(lead_row, lead_col, "Full_Name") if lead_row else lead_id
+            pkg  = safe_get(lead_row, lead_col, "Primary_Package") if lead_row else "—"
+            text_msg = (
+                f"💰 *Confirm Contract Amount*\n"
+                f"Lead: `{lead_id}` — {name}\n"
+                f"Package: {pkg}\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"💵 Total:        *${total:,}*\n"
+                f"💳 Deposit 30%: *${deposit:,}*\n"
+                f"📊 Balance 70%: *${balance:,}*\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"Fire System 3A with these amounts?"
+            )
+            buttons = [
+                [{"text": f"✅ Confirm & Fire System 3A", "callback_data": f"budget_contract_yes|{lead_id}|{total}"}],
+                [{"text": "✏️ Change Amount",             "callback_data": f"budget_contract_edit|{lead_id}"}],
+                [{"text": "❌ Cancel",                    "callback_data": f"view_pipe|{lead_id}"}]
+            ]
+            send_msg(chat_id, text_msg, {"inline_keyboard": buttons})
         return jsonify({"status": "ok"})
 
     return handle_callbacks(data, use_pipeline=False)
