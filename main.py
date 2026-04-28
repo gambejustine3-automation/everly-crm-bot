@@ -1048,5 +1048,50 @@ def pipeline_notify():
     })
     return jsonify({"status": "ok"})
 
+@app.route("/proposal_notify", methods=["POST"])
+def proposal_notify():
+    """
+    Called by Zapier System 2 after a proposal is sent.
+    Sends a Pipeline Bot card with a 'Send Contract' action button.
+    
+    Expected JSON fields from Zapier:
+      lead_id, project_id, client_name, proposal_link,
+      event_type, event_date, package (optional)
+    """
+    data         = request.json
+    lead_id      = data.get("lead_id", "—")
+    project_id   = data.get("project_id", "—")
+    client_name  = data.get("client_name", "—")
+    proposal_link= data.get("proposal_link", "—")
+    event_type   = data.get("event_type", "—")
+    event_date   = data.get("event_date", "—")
+    package      = data.get("package", "—")
+
+    text = (
+        f"📤 *Proposal Sent*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 Client: {client_name}\n"
+        f"🆔 Lead ID: `{lead_id}`\n"
+        f"🗂 Project ID: `{project_id}`\n"
+        f"📅 Event: {event_type} — {event_date}\n"
+        f"📦 Package: {package}\n"
+        f"📄 [View Proposal Doc]({proposal_link})\n"
+        f"📊 Stage: Proposal Sent\n"
+        f"✅ Pipeline updated automatically.\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"When the client confirms, tap below to send the contract."
+    )
+    buttons = [
+        [{"text": "📝 Send Contract", "callback_data": f"confirm_contract|{lead_id}"}],
+        [{"text": "📊 View Pipeline", "callback_data": f"view_pipe|{lead_id}"}]
+    ]
+    requests.post(f"{PIPELINE_API}/sendMessage", json={
+        "chat_id":      CHAT_ID,
+        "text":         text,
+        "parse_mode":   "Markdown",
+        "reply_markup": {"inline_keyboard": buttons}
+    })
+    return jsonify({"status": "ok"})
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
