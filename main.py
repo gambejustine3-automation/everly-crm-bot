@@ -52,17 +52,21 @@ PROJECT_STAGES = [
 STATUS_EMOJI = {"HOT": "🔴", "WARM": "🟡", "COLD": "🔵"}
 
 OUTCOME_LABELS = {
-    "completed_continue": "✅ Completed — moving to Proposal",
-    "completed_stop":     "🛑 Closed as Not a Fit",
-    "no_show":            "❌ Marked as No Show",
-    "reschedule":         "🔄 Marked for Rescheduling"
+    "completed_continue":  "✅ Completed — moving to Proposal",
+    "completed_stop":      "🛑 Closed as Not a Fit",
+    "no_show":             "❌ Marked as No Show",
+    "reschedule":          "🔄 Marked for Rescheduling",
+    "reschedule_oncall":   "🔁 Rescheduled On-Call",
+    "booked_for_client":   "📅 Booked For Client"
 }
 
 OUTCOME_MAP = {
-    "completed_continue": {"current_stage": "Discovery Call Completed", "call_status": "Completed",    "next_action": "Send Proposal"},
-    "completed_stop":     {"current_stage": "Closed Lost",              "call_status": "Completed-Not Continue",    "next_action": "Archive Lead"},
-    "no_show":            {"current_stage": "Discovery Call Booked",    "call_status": "No Show",      "next_action": "Follow up / Reschedule"},
-    "reschedule":         {"current_stage": "Discovery Call Booked",    "call_status": "Rescheduling", "next_action": "Send new Cal.com link"}
+    "completed_continue":  {"current_stage": "Discovery Call Completed", "call_status": "Completed",                  "next_action": "Send Proposal"},
+    "completed_stop":      {"current_stage": "Closed Lost",              "call_status": "Completed",                  "next_action": "Archive Lead"},
+    "no_show":             {"current_stage": "Discovery Call Booked",    "call_status": "No Show",                    "next_action": "Follow up / Reschedule"},
+    "reschedule":          {"current_stage": "Discovery Call Booked",    "call_status": "Rescheduling",               "next_action": "Send new Cal.com link"},
+    "reschedule_oncall":   {"current_stage": "Discovery Call Booked",    "call_status": "Rescheduling — Client Request", "next_action": "Send new Cal.com link"},
+    "booked_for_client":   {"current_stage": "Discovery Call Booked",    "call_status": "Booked by Victoria",         "next_action": "Confirm with client"}
 }
 
 # ─────────────────────────────────────────────
@@ -646,6 +650,8 @@ def _show_call_menu(chat_id, msg_id, lead_id, use_pipeline_edit=False):
         [{"text": "🛑 Completed — Not a Fit", "callback_data": f"confirm_call|{lead_id}|completed_stop"}],
         [{"text": "❌ No Show",               "callback_data": f"confirm_call|{lead_id}|no_show"}],
         [{"text": "🔄 Reschedule",            "callback_data": f"confirm_call|{lead_id}|reschedule"}],
+        [{"text": "🔁 Rescheduled On-Call",   "callback_data": f"confirm_call|{lead_id}|reschedule_oncall"}],
+        [{"text": "📅 Booked For Client",     "callback_data": f"confirm_call|{lead_id}|booked_for_client"}],
         [{"text": "⬅️ Back to Lead",          "callback_data": f"view_lead|{lead_id}"}]
     ]
     markup = {"inline_keyboard": buttons}
@@ -694,13 +700,16 @@ def _execute_call_out(chat_id, msg_id, target_id, outcome, cb_id, use_pipeline=F
             "Next_Action_Date": today_str
         }
     )
-    fire_webhook(CLOSE_LEAD_WEBHOOK, {
-        "lead_id":       target_id,
-        "action":        outcome,
-        "current_stage": mapping.get("current_stage"),
-        "call_status":   mapping.get("call_status"),
-        "timestamp":     today_str
-    })
+    # Only fire webhook for outcomes that need Zapier email routing
+    # booked_for_client and reschedule_oncall are internal — no email needed
+    if outcome not in ("booked_for_client", "reschedule_oncall"):
+        fire_webhook(CLOSE_LEAD_WEBHOOK, {
+            "lead_id":       target_id,
+            "action":        outcome,
+            "current_stage": mapping.get("current_stage"),
+            "call_status":   mapping.get("call_status"),
+            "timestamp":     today_str
+        })
 
     label = OUTCOME_LABELS.get(outcome, "Updated")
     confirmed_text = f"*{label}*\nLead: `{target_id}` — logged {today_str}"
@@ -903,7 +912,9 @@ def pipeline_notify():
         [{"text": "✅ Completed — Continue",  "callback_data": f"confirm_call|{lead_id}|completed_continue"}],
         [{"text": "🛑 Completed — Not a Fit", "callback_data": f"confirm_call|{lead_id}|completed_stop"}],
         [{"text": "❌ No Show",               "callback_data": f"confirm_call|{lead_id}|no_show"}],
-        [{"text": "🔄 Reschedule",            "callback_data": f"confirm_call|{lead_id}|reschedule"}]
+        [{"text": "🔄 Reschedule",            "callback_data": f"confirm_call|{lead_id}|reschedule"}],
+        [{"text": "🔁 Rescheduled On-Call",   "callback_data": f"confirm_call|{lead_id}|reschedule_oncall"}],
+        [{"text": "📅 Booked For Client",     "callback_data": f"confirm_call|{lead_id}|booked_for_client"}]
     ]
     requests.post(f"{PIPELINE_API}/sendMessage", json={
         "chat_id":      CHAT_ID,
