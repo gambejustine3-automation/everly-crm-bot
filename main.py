@@ -165,9 +165,10 @@ def edit_msg(chat_id, message_id, text, reply_markup=None):
 
 def edit_pipeline_msg(chat_id, message_id, text, reply_markup=None):
     payload = {
-        "chat_id": chat_id,
+        "chat_id":    chat_id,
         "message_id": message_id,
-        "text": text,
+        "text":       text,
+        "parse_mode": "Markdown",
     }
     if reply_markup:
         payload["reply_markup"] = reply_markup
@@ -689,7 +690,7 @@ def _confirm_call_out(chat_id, msg_id, lead_id, outcome, use_pipeline_edit=False
     else:
         edit_msg(chat_id, msg_id, text, markup)
 
-def _confirm_contract(chat_id, msg_id, lead_id):
+def _confirm_contract(chat_id, msg_id, lead_id, use_pipeline=False):
     """Shows a two-option confirmation before firing System 3A or closing the lead."""
     rows, col = read_sheet_with_headers("Leads!A1:T200")
     row  = next((r for r in rows if safe_get(r, col, "Lead_ID") == lead_id), None)
@@ -721,7 +722,11 @@ def _confirm_contract(chat_id, msg_id, lead_id):
         [{"text": "❌ No — Close Lead",                      "callback_data": f"contract_no|{lead_id}"}],
         [{"text": "🔙 Back to Pipeline",                     "callback_data": f"view_pipe|{lead_id}"}]
     ]
-    edit_msg(chat_id, msg_id, text, {"inline_keyboard": buttons})
+    markup = {"inline_keyboard": buttons}
+    if use_pipeline:
+        edit_pipeline_msg(chat_id, msg_id, text, markup)
+    else:
+        edit_msg(chat_id, msg_id, text, markup)
 
 def _execute_call_out(chat_id, msg_id, target_id, outcome, cb_id, use_pipeline=False):
     today_str = ph_now().strftime("%Y-%m-%d")
@@ -842,23 +847,29 @@ def handle_callbacks(data, use_pipeline=False):
         else:
             send_msg(chat_id, f"⚠️ Webhook failed — check CONTRACT_ZAPIER_WEBHOOK in Railway.")
     elif action == "confirm_contract":
-        _confirm_contract(chat_id, msg_id, target_id)
+        _confirm_contract(chat_id, msg_id, target_id, use_pipeline=use_pipeline)
     elif action == "contract_yes":
         fired = fire_webhook(CONTRACT_ZAPIER_WEBHOOK, {"lead_id": target_id})
-        answer_callback(cb["id"], "✅ Contract triggered — System 3A firing")
-        if fired:
-            edit_msg(chat_id, msg_id,
-                f"✅ *Contract Sent — System 3A Triggered*\n"
-                f"Lead: `{target_id}`\n\n"
-                f"• SignNow email will arrive in client's inbox shortly\n"
-                f"• Pipeline Tracker will auto-update → Contract Sent\n"
-                f"• Watch Telegram for confirmation"
-            )
+        # Answer the callback toast with the correct bot
+        api = PIPELINE_API if use_pipeline else DASHBOARD_API
+        requests.post(f"{api}/answerCallbackQuery", json={
+            "callback_query_id": cb["id"],
+            "text": "✅ Contract triggered — System 3A firing"
+        })
+        confirmed_text = (
+            f"✅ *Contract Sent — System 3A Triggered*\n"
+            f"Lead: `{target_id}`\n\n"
+            f"• SignNow email will arrive in client's inbox shortly\n"
+            f"• Pipeline Tracker will auto-update → Contract Sent\n"
+            f"• Watch Telegram for confirmation"
+        ) if fired else (
+            f"⚠️ *Webhook failed for `{target_id}`*\n"
+            f"Check CONTRACT_ZAPIER_WEBHOOK in Railway and retry."
+        )
+        if use_pipeline:
+            edit_pipeline_msg(chat_id, msg_id, confirmed_text)
         else:
-            edit_msg(chat_id, msg_id,
-                f"⚠️ *Webhook failed for `{target_id}`*\n"
-                f"Check CONTRACT_ZAPIER_WEBHOOK in Railway and retry."
-            )
+            edit_msg(chat_id, msg_id, confirmed_text)
     elif action == "contract_no":
         today_str = ph_now().strftime("%Y-%m-%d")
         _write_back(
@@ -870,8 +881,12 @@ def handle_callbacks(data, use_pipeline=False):
                 "Next_Action_Date": today_str
             }
         )
-        answer_callback(cb["id"], "❌ Lead closed — Pipeline updated")
-        edit_msg(chat_id, msg_id,
+        api = PIPELINE_API if use_pipeline else DASHBOARD_API
+        requests.post(f"{api}/answerCallbackQuery", json={
+            "callback_query_id": cb["id"],
+            "text": "❌ Lead closed — Pipeline updated"
+        })
+        closed_text = (
             f"❌ *Lead Closed — No Contract*\n"
             f"Lead: `{target_id}`\n\n"
             f"Pipeline Tracker updated:\n"
@@ -880,6 +895,10 @@ def handle_callbacks(data, use_pipeline=False):
             f"• Date: {today_str}\n\n"
             f"Lead has been archived."
         )
+        if use_pipeline:
+            edit_pipeline_msg(chat_id, msg_id, closed_text)
+        else:
+            edit_msg(chat_id, msg_id, closed_text)
     elif action == "deposit_paid":
         fired = fire_webhook(DEPOSIT_PAID_WEBHOOK, {"lead_id": target_id})
         if fired:
