@@ -32,6 +32,7 @@ PROPOSAL_ZAPIER_WEBHOOK  = os.environ.get("PROPOSAL_ZAPIER_WEBHOOK")
 CONTRACT_ZAPIER_WEBHOOK  = os.environ.get("CONTRACT_ZAPIER_WEBHOOK")
 DEPOSIT_PAID_WEBHOOK     = os.environ.get("DEPOSIT_PAID_WEBHOOK")
 DELIVER_GALLERY_WEBHOOK  = os.environ.get("DELIVER_GALLERY_WEBHOOK")
+RETENTION_WEBHOOK        = os.environ.get("RETENTION_WEBHOOK")
 
 # ─────────────────────────────────────────────
 # PH TIME HELPER
@@ -269,7 +270,9 @@ def handle_help_command(chat_id):
         "`/client <ID>` — Full client card with LTV and booking history\n"
         "`/project` — All active projects and their current stage\n\n"
         "🛠 *Admin*\n"
-        "`/resetleadcounter` — Reset lead ID counter to 0 (use before demos)\n\n"
+        "`/resetleadcounter` — Reset lead ID counter to 0 (use before demos)\n"
+        "`/deliver <Lead_ID> <drive_url>` — Trigger gallery delivery\n"
+        "`/retention <Lead_ID>` — Trigger post-delivery review + retention sequence\n\n"
         "💡 *Tips*\n"
         "• Tap any lead or client button to drill in\n"
         "• Update lead status (HOT/WARM/COLD) from the lead card\n"
@@ -792,6 +795,30 @@ def handle_callbacks(data, use_pipeline=False):
     elif action == "call_out" and len(parts) > 2:
         outcome = parts[2]
         _execute_call_out(chat_id, msg_id, target_id, outcome, cb["id"], use_pipeline=use_pipeline)
+    elif action == "send_proposal":
+        fired = fire_webhook(PROPOSAL_ZAPIER_WEBHOOK, {"lead_id": target_id})
+        if fired:
+            send_msg(chat_id, f"📄 Proposal generation triggered for `{target_id}`\nCheck your email and Telegram for confirmation.")
+        else:
+            send_msg(chat_id, f"⚠️ Webhook failed — check PROPOSAL_ZAPIER_WEBHOOK in Railway.")
+    elif action == "send_contract":
+        fired = fire_webhook(CONTRACT_ZAPIER_WEBHOOK, {"lead_id": target_id})
+        if fired:
+            send_msg(chat_id, f"📝 Contract triggered for `{target_id}`\nClient will receive SignNow email shortly.")
+        else:
+            send_msg(chat_id, f"⚠️ Webhook failed — check CONTRACT_ZAPIER_WEBHOOK in Railway.")
+    elif action == "deposit_paid":
+        fired = fire_webhook(DEPOSIT_PAID_WEBHOOK, {"lead_id": target_id})
+        if fired:
+            send_msg(chat_id, f"💰 Deposit marked as paid for `{target_id}`\nSheets updated. Confirmation email sent to client.")
+        else:
+            send_msg(chat_id, f"⚠️ Webhook failed — check DEPOSIT_PAID_WEBHOOK in Railway.")
+    elif action == "deliver_gallery":
+        send_msg(chat_id,
+            f"📁 To deliver the gallery for `{target_id}`, send:\n\n"
+            f"`/deliver {target_id} <google_drive_folder_url>`\n\n"
+            f"Example:\n`/deliver {target_id} https://drive.google.com/drive/folders/...`"
+        )
 
     return jsonify({"status": "ok"})
 
@@ -858,6 +885,31 @@ def dashboard():
         elif text == "/resetleadcounter":
             write_sheet("Config!A2", [[0]])
             send_msg(chat_id, "✅ Lead counter reset to 0. Next lead will be LED-0001.")
+        elif text.startswith("/deliver"):
+            parts = text.split(maxsplit=2)
+            if len(parts) != 3:
+                send_msg(chat_id, "Usage: /deliver <Lead_ID> <google_drive_folder_url>")
+                return jsonify({"status": "ok"})
+            lead_id, gallery_url = parts[1], parts[2]
+            fired = fire_webhook(DELIVER_GALLERY_WEBHOOK, {
+                "lead_id":    lead_id,
+                "gallery_url": gallery_url
+            })
+            if fired:
+                send_msg(chat_id, f"🖼️ Gallery delivery triggered for `{lead_id}`\n📁 {gallery_url}\n\nClient will receive email + Zoho invoice shortly.")
+            else:
+                send_msg(chat_id, "⚠️ Webhook failed — check DELIVER_GALLERY_WEBHOOK in Railway.")
+        elif text.startswith("/retention"):
+            parts = text.split()
+            if len(parts) != 2:
+                send_msg(chat_id, "Usage: /retention <Lead_ID>")
+                return jsonify({"status": "ok"})
+            lead_id = parts[1]
+            fired = fire_webhook(RETENTION_WEBHOOK, {"lead_id": lead_id})
+            if fired:
+                send_msg(chat_id, f"⭐ Retention sequence triggered for `{lead_id}`\nReview request email sent. Upsell follow-up queued.")
+            else:
+                send_msg(chat_id, "⚠️ Webhook failed — check RETENTION_WEBHOOK in Railway.")
         else:
             send_msg(chat_id, "❓ Unknown command. Type /help to see all commands.")
         return jsonify({"status": "ok"})
