@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify
 import requests
 import os
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
@@ -11,9 +11,9 @@ app = Flask(__name__)
 # ─────────────────────────────────────────────
 # ENVIRONMENT VARIABLES
 # ─────────────────────────────────────────────
-BOT_TOKEN                = os.environ.get("BOT_TOKEN")           # Everly&Co.ClientBot
-PIPELINE_BOT_TOKEN       = os.environ.get("PIPELINE_BOT_TOKEN") # Everly&Co.PipelineTrackerBot
-DASHBOARD_BOT_TOKEN      = os.environ.get("DASHBOARD_BOT_TOKEN")# Everly&Co.CRMDashboardBot
+BOT_TOKEN                = os.environ.get("BOT_TOKEN")
+PIPELINE_BOT_TOKEN       = os.environ.get("PIPELINE_BOT_TOKEN")
+DASHBOARD_BOT_TOKEN      = os.environ.get("DASHBOARD_BOT_TOKEN")
 CHAT_ID                  = os.environ.get("CHAT_ID")
 SPREADSHEET_ID           = os.environ.get("SPREADSHEET_ID")
 
@@ -52,7 +52,6 @@ PROJECT_STAGES = [
 ]
 STATUS_EMOJI = {"HOT": "🔴", "WARM": "🟡", "COLD": "🔵"}
 
-# Budgets that require Victoria to confirm the exact amount before firing System 3A
 UNCERTAIN_BUDGETS = {"$10,000+", "TBD", "10000+", "$10,000+ "}
 
 OUTCOME_LABELS = {
@@ -196,12 +195,14 @@ def send_client_msg(chat_id, text):
 # CAL.COM API HELPERS
 # ─────────────────────────────────────────────
 def cancel_cal_booking_for_lead(lead_id):
-    """Search Cal.com v2 for a booking matching this lead_id and cancel it."""
+    """
+    Search Cal.com v2 for an upcoming accepted booking matching lead_id and cancel it.
+    Uses bookingFieldsResponses.lead_id to match. Skips already-past bookings.
+    """
     if not CAL_API_KEY:
         print("[CAL CANCEL] CAL_API_KEY not set.")
         return False, "no_api_key"
     try:
-        # Fetch upcoming bookings via v2 API
         r = requests.get(
             "https://api.cal.com/v2/bookings",
             headers={
@@ -210,25 +211,34 @@ def cancel_cal_booking_for_lead(lead_id):
             },
             timeout=10
         )
-        print(f"[CAL DEBUG] raw response: {r.json()}")
         r.raise_for_status()
-        data = r.json().get("data", [])
+        data     = r.json().get("data", [])
         bookings = data if isinstance(data, list) else data.get("bookings", [])
 
-        # Find booking whose responses or metadata contains this lead_id
         target_uid = None
+        now_utc    = datetime.now(timezone.utc)
+
         for b in bookings:
-            print(f"[CAL DEBUG] raw response: {r.json()}")
             booking_lead_id = b.get("bookingFieldsResponses", {}).get("lead_id")
-            if booking_lead_id == lead_id and b.get("status") == "accepted":
-                target_uid = b.get("uid")
-                break
+            if booking_lead_id != lead_id:
+                continue
+            if b.get("status") != "accepted":
+                continue
+            # Only cancel bookings that haven't happened yet
+            start_str = b.get("start", "")
+            try:
+                start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+                if start_dt <= now_utc:
+                    continue  # skip past bookings
+            except Exception:
+                pass  # if we can't parse the date, try cancelling anyway
+            target_uid = b.get("uid")
+            break
 
         if not target_uid:
-            print(f"[CAL CANCEL] No booking found for lead {lead_id}")
+            print(f"[CAL CANCEL] No upcoming accepted booking found for lead {lead_id}")
             return False, "not_found"
 
-        # Cancel via v2 endpoint
         cr = requests.post(
             f"https://api.cal.com/v2/bookings/{target_uid}/cancel",
             headers={
@@ -270,7 +280,10 @@ def fetch_cal_bookings(date_str):
             timeout=10
         )
         r.raise_for_status()
-        return r.json().get("data", {}).get("bookings", [])
+        data = r.json().get("data", [])
+        if isinstance(data, list):
+            return data
+        return data.get("bookings", [])
     except Exception as e:
         print(f"[CAL ERROR] {e}")
         return []
@@ -281,21 +294,20 @@ def parse_cal_booking(booking):
     attendees    = booking.get("attendees", [])
     client_name  = attendees[0].get("name", "Unknown") if attendees else "Unknown"
     client_email = attendees[0].get("email", "—") if attendees else "—"
-    responses    = booking.get("responses", {})
-    metadata     = booking.get("metadata", {})
-    lead_id = (
-        responses.get("lead_id", {}).get("value")
-        or metadata.get("lead_id")
-        or "—"
-    )
+
+    # v2 stores form responses in bookingFieldsResponses
+    responses = booking.get("bookingFieldsResponses", {})
+    metadata  = booking.get("metadata", {})
+    lead_id   = responses.get("lead_id") or metadata.get("lead_id") or "—"
+
     start_raw = booking.get("start", booking.get("startTime", ""))
     try:
-        # v2 returns ISO 8601 with timezone
         dt_utc   = datetime.strptime(start_raw[:19], "%Y-%m-%dT%H:%M:%S")
         dt_local = dt_utc + timedelta(hours=8)
         time_str = dt_local.strftime("%I:%M %p")
     except Exception:
         time_str = start_raw
+
     meeting_url = (
         booking.get("videoCallData", {}).get("url")
         or booking.get("location", "—")
@@ -773,7 +785,6 @@ def _confirm_call_out(chat_id, msg_id, lead_id, outcome, use_pipeline_edit=False
         edit_msg(chat_id, msg_id, text, markup)
 
 def _confirm_contract(chat_id, msg_id, lead_id, use_pipeline=False):
-    """Confirmation screen before firing System 3A or closing the lead."""
     rows, col = read_sheet_with_headers("Leads!A1:T200")
     row  = next((r for r in rows if safe_get(r, col, "Lead_ID") == lead_id), None)
     name = safe_get(row, col, "Full_Name") if row else lead_id
@@ -842,10 +853,12 @@ def _execute_call_out(chat_id, msg_id, target_id, outcome, cb_id, use_pipeline=F
     else:
         edit_msg(chat_id, msg_id, confirmed_text)
 
-    # 5. Cancel Cal.com booking — runs after Telegram is already updated
+    # 5. Cancel Cal.com booking for reschedule outcomes — runs after Telegram is updated
     if outcome in ("reschedule", "reschedule_oncall"):
         cancelled, result = cancel_cal_booking_for_lead(target_id)
-        if not cancelled:
+        if cancelled:
+            print(f"[CAL CANCEL] Successfully cancelled booking {result} for lead {target_id}")
+        else:
             print(f"[CAL CANCEL] Warning: could not cancel booking for {target_id}: {result}")
 
     # 6. Fire Zapier webhook for all outcomes except internal-only booked_for_client
@@ -1042,7 +1055,6 @@ def handle_callbacks(data, use_pipeline=False):
         else:
             edit_msg(chat_id, msg_id, closed_text)
     elif action == "budget_contract_yes":
-        # callback_data: budget_contract_yes|{lead_id}|{total_int}
         api = PIPELINE_API if use_pipeline else DASHBOARD_API
         try:
             total = int(parts[2])
@@ -1354,12 +1366,6 @@ def pipeline_notify():
 
 @app.route("/proposal_notify", methods=["POST"])
 def proposal_notify():
-    """
-    Called by Zapier System 2 after a proposal is sent.
-    Posts to Pipeline Bot with a 'Send Contract' action button.
-    Expected fields: lead_id, project_id, client_name, proposal_link,
-                     event_type, event_date, package
-    """
     data          = request.json
     lead_id       = data.get("lead_id", "—")
     project_id    = data.get("project_id", "—")
