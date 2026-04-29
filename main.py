@@ -65,12 +65,12 @@ OUTCOME_LABELS = {
 }
 
 OUTCOME_MAP = {
-    "completed_continue":  {"current_stage": "Discovery Call Completed", "call_status": "Completed",                  "next_action": "Send Proposal"},
-    "completed_stop":      {"current_stage": "Closed Lost",              "call_status": "Completed",                  "next_action": "Archive Lead"},
-    "no_show":             {"current_stage": "Discovery Call Booked",    "call_status": "No Show",                    "next_action": "Follow up / Reschedule"},
-    "reschedule":          {"current_stage": "Discovery Call Booked",    "call_status": "Rescheduling",               "next_action": "Send new Cal.com link"},
+    "completed_continue":  {"current_stage": "Discovery Call Completed", "call_status": "Completed",                     "next_action": "Send Proposal"},
+    "completed_stop":      {"current_stage": "Closed Lost",              "call_status": "Completed",                     "next_action": "Archive Lead"},
+    "no_show":             {"current_stage": "Discovery Call Booked",    "call_status": "No Show",                       "next_action": "Follow up / Reschedule"},
+    "reschedule":          {"current_stage": "Discovery Call Booked",    "call_status": "Rescheduling",                  "next_action": "Send new Cal.com link"},
     "reschedule_oncall":   {"current_stage": "Discovery Call Booked",    "call_status": "Rescheduling — Client Request", "next_action": "Send new Cal.com link"},
-    "booked_for_client":   {"current_stage": "Discovery Call Booked",    "call_status": "Booked by Victoria",         "next_action": "Confirm with client"}
+    "booked_for_client":   {"current_stage": "Discovery Call Booked",    "call_status": "Booked by Victoria",            "next_action": "Confirm with client"}
 }
 
 # ─────────────────────────────────────────────
@@ -193,87 +193,117 @@ def send_client_msg(chat_id, text):
     })
 
 # ─────────────────────────────────────────────
-# CAL.COM API HELPER
+# CAL.COM API HELPERS
 # ─────────────────────────────────────────────
 def cancel_cal_booking_for_lead(lead_id):
-    """Search Cal.com for a booking matching this lead_id and cancel it."""
+    """Search Cal.com v2 for a booking matching this lead_id and cancel it."""
     if not CAL_API_KEY:
         print("[CAL CANCEL] CAL_API_KEY not set.")
         return False, "no_api_key"
     try:
-        now = ph_now()
-        date_from = (now - timedelta(days=1)).strftime("%Y-%m-%dT00:00:00+08:00")
-        date_to   = (now + timedelta(days=60)).strftime("%Y-%m-%dT23:59:59+08:00")
-        r = requests.get("https://api.cal.com/v1/bookings", params={
-            "apiKey":   CAL_API_KEY,
-            "dateFrom": date_from,
-            "dateTo":   date_to,
-        }, timeout=10)
-        r.raise_for_status()
-        bookings = r.json().get("bookings", [])
-
-        target = next(
-            (b for b in bookings if parse_cal_booking(b)["lead_id"] == lead_id),
-            None
+        # Fetch upcoming bookings via v2 API
+        r = requests.get(
+            "https://api.cal.com/v2/bookings",
+            headers={
+                "Authorization": f"Bearer {CAL_API_KEY}",
+                "cal-api-version": "2024-08-13"
+            },
+            params={"status": "upcoming"},
+            timeout=10
         )
-        if not target:
+        r.raise_for_status()
+        bookings = r.json().get("data", {}).get("bookings", [])
+
+        # Find booking whose responses or metadata contains this lead_id
+        target_uid = None
+        for b in bookings:
+            responses = b.get("responses", {})
+            metadata  = b.get("metadata", {})
+            booking_lead_id = (
+                responses.get("lead_id", {}).get("value")
+                or metadata.get("lead_id")
+            )
+            if booking_lead_id == lead_id:
+                target_uid = b.get("uid")
+                break
+
+        if not target_uid:
             print(f"[CAL CANCEL] No booking found for lead {lead_id}")
             return False, "not_found"
 
-        booking_id = target.get("id")   # numeric ID, not uid
-        cr = requests.delete(
-            f"https://api.cal.com/v1/bookings/{booking_id}/cancel",
-            params={"apiKey": CAL_API_KEY},
+        # Cancel via v2 endpoint
+        cr = requests.post(
+            f"https://api.cal.com/v2/bookings/{target_uid}/cancel",
+            headers={
+                "Authorization": f"Bearer {CAL_API_KEY}",
+                "cal-api-version": "2024-08-13",
+                "Content-Type": "application/json"
+            },
             json={"cancellationReason": "Rescheduled by host"},
             timeout=10
         )
         cr.raise_for_status()
-        print(f"[CAL CANCEL] Cancelled booking {booking_id} for lead {lead_id}")
-        return True, booking_id
+        print(f"[CAL CANCEL] Cancelled booking {target_uid} for lead {lead_id}")
+        return True, target_uid
+
     except Exception as e:
         print(f"[CAL CANCEL ERROR] {e}")
         return False, str(e)
-        
+
+
 def fetch_cal_bookings(date_str):
+    """Fetch bookings for a given date via Cal.com v2 API."""
     if not CAL_API_KEY:
         print("[CAL] CAL_API_KEY not set.")
         return []
     try:
         date_from = f"{date_str}T00:00:00+08:00"
         date_to   = f"{date_str}T23:59:59+08:00"
-        url = "https://api.cal.com/v1/bookings"
-        params = {
-            "apiKey":   CAL_API_KEY,
-            "dateFrom": date_from,
-            "dateTo":   date_to,
-            "status":   "upcoming"
-        }
-        r = requests.get(url, params=params, timeout=10)
+        r = requests.get(
+            "https://api.cal.com/v2/bookings",
+            headers={
+                "Authorization": f"Bearer {CAL_API_KEY}",
+                "cal-api-version": "2024-08-13"
+            },
+            params={
+                "afterStart": date_from,
+                "beforeEnd":  date_to,
+                "status":     "upcoming"
+            },
+            timeout=10
+        )
         r.raise_for_status()
-        data = r.json()
-        return data.get("bookings", [])
+        return r.json().get("data", {}).get("bookings", [])
     except Exception as e:
         print(f"[CAL ERROR] {e}")
         return []
 
+
 def parse_cal_booking(booking):
+    """Parse a Cal.com v2 booking object into a flat dict."""
     attendees    = booking.get("attendees", [])
     client_name  = attendees[0].get("name", "Unknown") if attendees else "Unknown"
     client_email = attendees[0].get("email", "—") if attendees else "—"
-    responses = booking.get("responses", {})
-    metadata  = booking.get("metadata", {})
-    lead_id   = (
+    responses    = booking.get("responses", {})
+    metadata     = booking.get("metadata", {})
+    lead_id = (
         responses.get("lead_id", {}).get("value")
         or metadata.get("lead_id")
         or "—"
     )
-    start_raw = booking.get("startTime", "")
+    start_raw = booking.get("start", booking.get("startTime", ""))
     try:
-        dt_utc   = datetime.strptime(start_raw, "%Y-%m-%dT%H:%M:%SZ")
+        # v2 returns ISO 8601 with timezone
+        dt_utc   = datetime.strptime(start_raw[:19], "%Y-%m-%dT%H:%M:%S")
         dt_local = dt_utc + timedelta(hours=8)
         time_str = dt_local.strftime("%I:%M %p")
     except Exception:
         time_str = start_raw
+    meeting_url = (
+        booking.get("videoCallData", {}).get("url")
+        or booking.get("location", "—")
+        or "—"
+    )
     return {
         "id":           booking.get("id"),
         "uid":          booking.get("uid", ""),
@@ -281,8 +311,8 @@ def parse_cal_booking(booking):
         "client_email": client_email,
         "lead_id":      lead_id,
         "time":         time_str,
-        "status":       booking.get("status", "ACCEPTED"),
-        "meeting_url":  booking.get("videoCallData", {}).get("url", "—")
+        "status":       booking.get("status", "accepted"),
+        "meeting_url":  meeting_url
     }
 
 # ─────────────────────────────────────────────
@@ -412,7 +442,7 @@ def handle_schedule_command(chat_id, date_str=None, date_label=None):
     bookings_raw = fetch_cal_bookings(date_str)
     bookings = [
         parse_cal_booking(b) for b in bookings_raw
-        if b.get("status", "").upper() in ("ACCEPTED", "UPCOMING", "PENDING", "BOOKED")
+        if b.get("status", "").lower() in ("accepted", "upcoming", "pending", "booked")
     ]
     lines   = [f"📅 *DISCOVERY CALLS — {date_label}*\n"]
     buttons = []
@@ -723,7 +753,8 @@ def _confirm_call_out(chat_id, msg_id, lead_id, outcome, use_pipeline_edit=False
         "completed_continue": "✅ Completed — Continue",
         "completed_stop":     "🛑 Completed — Not a Fit",
         "no_show":            "❌ No Show",
-        "reschedule":         "🔄 Reschedule"
+        "reschedule":         "🔄 Reschedule",
+        "reschedule_oncall":  "🔁 Rescheduled On-Call"
     }
     label = outcome_display.get(outcome, outcome)
     text = (
@@ -786,6 +817,7 @@ def _execute_call_out(chat_id, msg_id, target_id, outcome, cb_id, use_pipeline=F
     today_str = ph_now().strftime("%Y-%m-%d")
     mapping   = OUTCOME_MAP.get(outcome, {})
 
+    # 1. Write pipeline update to Google Sheets
     _write_back(
         "Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", target_id,
         {
@@ -796,13 +828,30 @@ def _execute_call_out(chat_id, msg_id, target_id, outcome, cb_id, use_pipeline=F
             "Next_Action_Date": today_str
         }
     )
-   # Cancel Cal.com booking for any reschedule outcome
+
+    # 2. Build response text
+    label          = OUTCOME_LABELS.get(outcome, "Updated")
+    confirmed_text = f"*{label}*\nLead: `{target_id}` — logged {today_str}"
+
+    # 3. Answer Telegram callback FIRST — must happen within 5 seconds
+    requests.post(f"{PIPELINE_API}/answerCallbackQuery", json={
+        "callback_query_id": cb_id,
+        "text": label
+    })
+
+    # 4. Edit the message immediately so buttons disappear
+    if use_pipeline:
+        edit_pipeline_msg(chat_id, msg_id, confirmed_text)
+    else:
+        edit_msg(chat_id, msg_id, confirmed_text)
+
+    # 5. Cancel Cal.com booking — runs after Telegram is already updated
     if outcome in ("reschedule", "reschedule_oncall"):
         cancelled, result = cancel_cal_booking_for_lead(target_id)
         if not cancelled:
             print(f"[CAL CANCEL] Warning: could not cancel booking for {target_id}: {result}")
 
-    # Fire webhook for all outcomes except booked_for_client (internal only)
+    # 6. Fire Zapier webhook for all outcomes except internal-only booked_for_client
     if outcome != "booked_for_client":
         fire_webhook(CLOSE_LEAD_WEBHOOK, {
             "lead_id":       target_id,
@@ -812,13 +861,7 @@ def _execute_call_out(chat_id, msg_id, target_id, outcome, cb_id, use_pipeline=F
             "timestamp":     today_str
         })
 
-    # Remove buttons by editing message to confirmed state
-    if use_pipeline:
-        edit_pipeline_msg(chat_id, msg_id, confirmed_text)
-    else:
-        edit_msg(chat_id, msg_id, confirmed_text)
-
-    # Send confirmation to Pipeline Bot
+    # 7. Send confirmation message to Pipeline Bot chat
     requests.post(f"{PIPELINE_API}/sendMessage", json={
         "chat_id": CHAT_ID,
         "text": f"✅ {label} for Lead {target_id}"
@@ -923,7 +966,6 @@ def handle_callbacks(data, use_pipeline=False):
         else:
             send_msg(chat_id, f"⚠️ Webhook failed — check PROPOSAL_ZAPIER_WEBHOOK in Railway.")
     elif action == "send_contract":
-        # Legacy fallback — routes through confirmation screen
         _confirm_contract(chat_id, msg_id, target_id, use_pipeline=use_pipeline)
     elif action == "confirm_contract":
         _confirm_contract(chat_id, msg_id, target_id, use_pipeline=use_pipeline)
@@ -1143,7 +1185,7 @@ def dashboard():
                 return jsonify({"status": "ok"})
             lead_id, gallery_url = parts[1], parts[2]
             fired = fire_webhook(DELIVER_GALLERY_WEBHOOK, {
-                "lead_id":    lead_id,
+                "lead_id":     lead_id,
                 "gallery_url": gallery_url
             })
             if fired:
