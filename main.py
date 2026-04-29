@@ -529,7 +529,7 @@ def _show_lead(chat_id, msg_id, target_id, method="edit"):
     else:
         send_msg(chat_id, text, markup)
 
-def _show_pipeline(chat_id, msg_id, target_id, method="edit"):
+def _show_pipeline(chat_id, msg_id, target_id, method="edit", use_pipeline=False):
     rows, col = read_sheet_with_headers("Pipeline Tracker!A1:L200")
     row = next((r for r in rows if safe_get(r, col, "Lead_ID") == target_id), None)
     if not row:
@@ -569,7 +569,10 @@ def _show_pipeline(chat_id, msg_id, target_id, method="edit"):
     buttons.append([{"text": "⬅️ Back to Pipeline", "callback_data": "nav_pipe|none"}])
     markup = {"inline_keyboard": buttons}
     if method == "edit" and msg_id:
-        edit_msg(chat_id, msg_id, text, markup)
+        if use_pipeline:
+            edit_pipeline_msg(chat_id, msg_id, text, markup)
+        else:
+            edit_msg(chat_id, msg_id, text, markup)
     else:
         send_msg(chat_id, text, markup)
 
@@ -810,7 +813,7 @@ def handle_callbacks(data, use_pipeline=False):
     if action == "view_lead":
         _show_lead(chat_id, msg_id, target_id)
     elif action == "view_pipe":
-        _show_pipeline(chat_id, msg_id, target_id)
+        _show_pipeline(chat_id, msg_id, target_id, use_pipeline=use_pipeline)
     elif action == "view_project":
         _show_project(chat_id, msg_id, target_id)
     elif action == "view_client":
