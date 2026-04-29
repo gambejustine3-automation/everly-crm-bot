@@ -212,7 +212,8 @@ def cancel_cal_booking_for_lead(lead_id):
             timeout=10
         )
         r.raise_for_status()
-        bookings = r.json().get("data", {}).get("bookings", [])
+        data = r.json().get("data", [])
+        bookings = data if isinstance(data, list) else data.get("bookings", [])
 
         # Find booking whose responses or metadata contains this lead_id
         target_uid = None
