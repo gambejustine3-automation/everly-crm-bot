@@ -220,7 +220,7 @@ def cancel_cal_booking_for_lead(lead_id):
         for b in bookings:
             print(f"[CAL DEBUG] raw response: {r.json()}")
             booking_lead_id = b.get("bookingFieldsResponses", {}).get("lead_id")
-            if booking_lead_id == lead_id:
+            if booking_lead_id == lead_id and b.get("status") == "accepted":
                 target_uid = b.get("uid")
                 break
 
