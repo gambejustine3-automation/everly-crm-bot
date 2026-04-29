@@ -440,7 +440,7 @@ def handle_search_command(chat_id, query):
     buttons.append([{"text": "⬅️ All Leads", "callback_data": "nav_leads|none"}])
     send_msg(chat_id, "\n".join(lines), {"inline_keyboard": buttons})
 
-def handle_pipeline_command(chat_id):
+def handle_pipeline_command(chat_id, use_pipeline=False):
     rows, col = read_sheet_with_headers("Pipeline Tracker!A1:L200")
     if not rows:
         return send_msg(chat_id, "📭 Pipeline is empty.")
@@ -457,7 +457,10 @@ def handle_pipeline_command(chat_id):
         {"text": "📋 All Leads", "callback_data": "nav_leads|none"},
         {"text": "🗂 Projects",  "callback_data": "nav_projects|none"}
     ])
-    send_msg(chat_id, "\n".join(lines), {"inline_keyboard": buttons})
+    if use_pipeline:
+        send_pipeline_msg(chat_id, "\n".join(lines), {"inline_keyboard": buttons})
+    else:
+        send_msg(chat_id, "\n".join(lines), {"inline_keyboard": buttons})
 
 def handle_project_command(chat_id):
     rows, col = read_sheet_with_headers("Projects!A1:V200")
@@ -487,7 +490,7 @@ def handle_client_command(chat_id, client_id):
 # ─────────────────────────────────────────────
 # VIEW HANDLERS
 # ─────────────────────────────────────────────
-def _show_lead(chat_id, msg_id, target_id, method="edit"):
+def _show_lead(chat_id, msg_id, target_id, method="edit", use_pipeline=False):
     rows, col = read_sheet_with_headers("Leads!A1:T200")
     row = next((r for r in rows if safe_get(r, col, "Lead_ID") == target_id), None)
     if not row:
@@ -525,7 +528,10 @@ def _show_lead(chat_id, msg_id, target_id, method="edit"):
     ]
     markup = {"inline_keyboard": buttons}
     if method == "edit" and msg_id:
-        edit_msg(chat_id, msg_id, text, markup)
+        if use_pipeline:
+            edit_pipeline_msg(chat_id, msg_id, text, markup)
+        else:
+            edit_msg(chat_id, msg_id, text, markup)
     else:
         send_msg(chat_id, text, markup)
 
@@ -576,7 +582,7 @@ def _show_pipeline(chat_id, msg_id, target_id, method="edit", use_pipeline=False
     else:
         send_msg(chat_id, text, markup)
 
-def _show_project(chat_id, msg_id, lead_id, method="edit"):
+def _show_project(chat_id, msg_id, lead_id, method="edit", use_pipeline=False):
     rows, col = read_sheet_with_headers("Projects!A1:V200")
     row = next((r for r in rows if safe_get(r, col, "Lead_ID") == lead_id), None)
     if not row:
@@ -607,7 +613,10 @@ def _show_project(chat_id, msg_id, lead_id, method="edit"):
     buttons.append([{"text": "⬅️ Projects List", "callback_data": "nav_projects|none"}])
     markup = {"inline_keyboard": buttons}
     if method == "edit" and msg_id:
-        edit_msg(chat_id, msg_id, text, markup)
+        if use_pipeline:
+            edit_pipeline_msg(chat_id, msg_id, text, markup)
+        else:
+            edit_msg(chat_id, msg_id, text, markup)
     else:
         send_msg(chat_id, text, markup)
 
@@ -662,7 +671,6 @@ def _show_call_menu(chat_id, msg_id, lead_id, use_pipeline_edit=False):
         [{"text": "❌ No Show",               "callback_data": f"confirm_call|{lead_id}|no_show"}],
         [{"text": "🔄 Reschedule",            "callback_data": f"confirm_call|{lead_id}|reschedule"}],
         [{"text": "🔁 Rescheduled On-Call",   "callback_data": f"confirm_call|{lead_id}|reschedule_oncall"}],
-        [{"text": "📅 Booked For Client",     "callback_data": f"confirm_call|{lead_id}|booked_for_client"}],
         [{"text": "⬅️ Back to Lead",          "callback_data": f"view_lead|{lead_id}"}]
     ]
     markup = {"inline_keyboard": buttons}
@@ -811,11 +819,11 @@ def handle_callbacks(data, use_pipeline=False):
     target_id = parts[1] if len(parts) > 1 else None
 
     if action == "view_lead":
-        _show_lead(chat_id, msg_id, target_id)
+        _show_lead(chat_id, msg_id, target_id, use_pipeline=use_pipeline)
     elif action == "view_pipe":
         _show_pipeline(chat_id, msg_id, target_id, use_pipeline=use_pipeline)
     elif action == "view_project":
-        _show_project(chat_id, msg_id, target_id)
+        _show_project(chat_id, msg_id, target_id, use_pipeline=use_pipeline)
     elif action == "view_client":
         _show_client(chat_id, msg_id, target_id, method="edit")
     elif action == "nav_leads":
@@ -823,7 +831,7 @@ def handle_callbacks(data, use_pipeline=False):
     elif action == "nav_hot":
         handle_hot_command(chat_id)
     elif action == "nav_pipe":
-        handle_pipeline_command(chat_id)
+        handle_pipeline_command(chat_id, use_pipeline=use_pipeline)
     elif action == "nav_projects":
         handle_project_command(chat_id)
     elif action == "nav_schedule":
@@ -833,6 +841,38 @@ def handle_callbacks(data, use_pipeline=False):
             handle_schedule_command(chat_id)
     elif action == "nav_today":
         handle_today_command(chat_id)
+    elif action == "upd_lead" and len(parts) > 2:
+        new_status = parts[2]
+        _write_back("Leads", "Leads!A1:T200", "Lead_ID", target_id,
+                    {"Lead_Status": new_status})
+        api = PIPELINE_API if use_pipeline else DASHBOARD_API
+        requests.post(f"{api}/answerCallbackQuery", json={
+            "callback_query_id": cb["id"],
+            "text": f"✅ Status updated to {new_status}"
+        })
+        _show_lead(chat_id, msg_id, target_id, use_pipeline=use_pipeline)
+    elif action == "upd_pipe" and len(parts) > 2:
+        new_stage = parts[2]
+        today_str = ph_now().strftime("%Y-%m-%d")
+        _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", target_id,
+                    {"Current_Stage": new_stage, "Last_Action": f"Stage moved to {new_stage}",
+                     "Next_Action_Date": today_str})
+        api = PIPELINE_API if use_pipeline else DASHBOARD_API
+        requests.post(f"{api}/answerCallbackQuery", json={
+            "callback_query_id": cb["id"],
+            "text": f"✅ Stage → {new_stage}"
+        })
+        _show_pipeline(chat_id, msg_id, target_id, use_pipeline=use_pipeline)
+    elif action == "upd_proj" and len(parts) > 2:
+        new_stage = parts[2]
+        _write_back("Projects", "Projects!A1:V200", "Lead_ID", target_id,
+                    {"Current_Stage": new_stage})
+        api = PIPELINE_API if use_pipeline else DASHBOARD_API
+        requests.post(f"{api}/answerCallbackQuery", json={
+            "callback_query_id": cb["id"],
+            "text": f"✅ Project stage → {new_stage}"
+        })
+        _show_project(chat_id, msg_id, target_id, use_pipeline=use_pipeline)
     elif action == "call_menu":
         _show_call_menu(chat_id, msg_id, target_id, use_pipeline_edit=use_pipeline)
     elif action == "confirm_call" and len(parts) > 2:
@@ -1229,8 +1269,7 @@ def pipeline_notify():
         [{"text": "🛑 Completed — Not a Fit", "callback_data": f"confirm_call|{lead_id}|completed_stop"}],
         [{"text": "❌ No Show",               "callback_data": f"confirm_call|{lead_id}|no_show"}],
         [{"text": "🔄 Reschedule",            "callback_data": f"confirm_call|{lead_id}|reschedule"}],
-        [{"text": "🔁 Rescheduled On-Call",   "callback_data": f"confirm_call|{lead_id}|reschedule_oncall"}],
-        [{"text": "📅 Booked For Client",     "callback_data": f"confirm_call|{lead_id}|booked_for_client"}]
+        [{"text": "🔁 Rescheduled On-Call",   "callback_data": f"confirm_call|{lead_id}|reschedule_oncall"}]
     ]
     requests.post(f"{PIPELINE_API}/sendMessage", json={
         "chat_id":      CHAT_ID,
