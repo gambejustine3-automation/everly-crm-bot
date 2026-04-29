@@ -208,9 +208,9 @@ def cancel_cal_booking_for_lead(lead_id):
                 "Authorization": f"Bearer {CAL_API_KEY}",
                 "cal-api-version": "2024-08-13"
             },
-            params={"status": "upcoming"},
             timeout=10
         )
+        print(f"[CAL DEBUG] raw response: {r.json()}")
         r.raise_for_status()
         data = r.json().get("data", [])
         bookings = data if isinstance(data, list) else data.get("bookings", [])
