@@ -218,7 +218,7 @@ def cancel_cal_booking_for_lead(lead_id):
         # Find booking whose responses or metadata contains this lead_id
         target_uid = None
         for b in bookings:
-            print(f"[CAL DEBUG] booking responses: {b.get('responses')} | metadata: {b.get('metadata')}")
+            print(f"[CAL DEBUG] full booking: {json.dumps(b, default=str)[:500]}")
             responses = b.get("responses", {})
             metadata  = b.get("metadata", {})
             raw = responses.get("lead_id") or metadata.get("lead_id")
