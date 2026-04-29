@@ -195,6 +195,44 @@ def send_client_msg(chat_id, text):
 # ─────────────────────────────────────────────
 # CAL.COM API HELPER
 # ─────────────────────────────────────────────
+def cancel_cal_booking_for_lead(lead_id):
+    """Search Cal.com for a booking matching this lead_id and cancel it."""
+    if not CAL_API_KEY:
+        print("[CAL CANCEL] CAL_API_KEY not set.")
+        return False, "no_api_key"
+    try:
+        now = ph_now()
+        date_from = (now - timedelta(days=1)).strftime("%Y-%m-%dT00:00:00+08:00")
+        date_to   = (now + timedelta(days=60)).strftime("%Y-%m-%dT23:59:59+08:00")
+        r = requests.get("https://api.cal.com/v1/bookings", params={
+            "apiKey":   CAL_API_KEY,
+            "dateFrom": date_from,
+            "dateTo":   date_to,
+        }, timeout=10)
+        r.raise_for_status()
+        bookings = r.json().get("bookings", [])
+
+        target = next(
+            (b for b in bookings if parse_cal_booking(b)["lead_id"] == lead_id),
+            None
+        )
+        if not target:
+            print(f"[CAL CANCEL] No booking found for lead {lead_id}")
+            return False, "not_found"
+
+        uid = target.get("uid")
+        cr = requests.delete(
+            f"https://api.cal.com/v1/bookings/{uid}/cancel",
+            params={"apiKey": CAL_API_KEY},
+            timeout=10
+        )
+        cr.raise_for_status()
+        print(f"[CAL CANCEL] Cancelled booking {uid} for lead {lead_id}")
+        return True, uid
+    except Exception as e:
+        print(f"[CAL CANCEL ERROR] {e}")
+        return False, str(e)
+        
 def fetch_cal_bookings(date_str):
     if not CAL_API_KEY:
         print("[CAL] CAL_API_KEY not set.")
@@ -757,9 +795,14 @@ def _execute_call_out(chat_id, msg_id, target_id, outcome, cb_id, use_pipeline=F
             "Next_Action_Date": today_str
         }
     )
-    # Only fire webhook for outcomes that need Zapier email routing
-    # booked_for_client and reschedule_oncall are internal — no email needed
-    if outcome not in ("booked_for_client", "reschedule_oncall"):
+   # Cancel Cal.com booking for any reschedule outcome
+    if outcome in ("reschedule", "reschedule_oncall"):
+        cancelled, result = cancel_cal_booking_for_lead(target_id)
+        if not cancelled:
+            print(f"[CAL CANCEL] Warning: could not cancel booking for {target_id}: {result}")
+
+    # Fire webhook for all outcomes except booked_for_client (internal only)
+    if outcome != "booked_for_client":
         fire_webhook(CLOSE_LEAD_WEBHOOK, {
             "lead_id":       target_id,
             "action":        outcome,
@@ -767,15 +810,6 @@ def _execute_call_out(chat_id, msg_id, target_id, outcome, cb_id, use_pipeline=F
             "call_status":   mapping.get("call_status"),
             "timestamp":     today_str
         })
-
-    label = OUTCOME_LABELS.get(outcome, "Updated")
-    confirmed_text = f"*{label}*\nLead: `{target_id}` — logged {today_str}"
-
-    # Answer callback toast
-    requests.post(f"{PIPELINE_API}/answerCallbackQuery", json={
-        "callback_query_id": cb_id,
-        "text": label
-    })
 
     # Remove buttons by editing message to confirmed state
     if use_pipeline:
