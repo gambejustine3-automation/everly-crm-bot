@@ -217,11 +217,12 @@ def cancel_cal_booking_for_lead(lead_id):
         # Find booking whose responses or metadata contains this lead_id
         target_uid = None
         for b in bookings:
+            print(f"[CAL DEBUG] booking responses: {b.get('responses')} | metadata: {b.get('metadata')}")
             responses = b.get("responses", {})
             metadata  = b.get("metadata", {})
+            raw = responses.get("lead_id") or metadata.get("lead_id")
             booking_lead_id = (
-                responses.get("lead_id", {}).get("value")
-                or metadata.get("lead_id")
+                raw.get("value") if isinstance(raw, dict) else raw
             )
             if booking_lead_id == lead_id:
                 target_uid = b.get("uid")
