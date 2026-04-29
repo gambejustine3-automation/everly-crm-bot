@@ -1140,6 +1140,54 @@ def dashboard():
 @app.route("/pipeline_dashboard", methods=["POST"])
 def pipeline_dashboard():
     data = request.json
+
+    if "message" in data:
+        msg     = data["message"]
+        text    = msg.get("text", "").strip()
+        chat_id = msg["chat"]["id"]
+
+        if text.startswith("/setbudget"):
+            parts = text.split(maxsplit=2)
+            if len(parts) != 3:
+                send_pipeline_msg(chat_id,
+                    "💰 Usage: `/setbudget <Lead_ID> <amount>`\n"
+                    "Example: `/setbudget LED-0001 13000`"
+                )
+                return jsonify({"status": "ok"})
+            lead_id = parts[1]
+            try:
+                total = int(float(parts[2].replace("$","").replace(",","").strip()))
+            except ValueError:
+                send_pipeline_msg(chat_id,
+                    "❌ Invalid amount — numbers only.\n"
+                    "Example: `/setbudget LED-0001 13000`"
+                )
+                return jsonify({"status": "ok"})
+            deposit = round(total * 0.30)
+            balance = total - deposit
+            lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
+            lead_row = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == lead_id), None)
+            name = safe_get(lead_row, lead_col, "Full_Name") if lead_row else lead_id
+            pkg  = safe_get(lead_row, lead_col, "Primary_Package") if lead_row else "—"
+            text_msg = (
+                f"💰 *Confirm Contract Amount*\n"
+                f"Lead: `{lead_id}` — {name}\n"
+                f"Package: {pkg}\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"💵 Total:        *${total:,}*\n"
+                f"💳 Deposit 30%: *${deposit:,}*\n"
+                f"📊 Balance 70%: *${balance:,}*\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"Fire System 3A with these amounts?"
+            )
+            buttons = [
+                [{"text": "✅ Confirm & Fire System 3A", "callback_data": f"budget_contract_yes|{lead_id}|{total}"}],
+                [{"text": "✏️ Change Amount",            "callback_data": f"budget_contract_edit|{lead_id}"}],
+                [{"text": "❌ Cancel",                   "callback_data": f"view_pipe|{lead_id}"}]
+            ]
+            send_pipeline_msg(chat_id, text_msg, {"inline_keyboard": buttons})
+            return jsonify({"status": "ok"})
+
     return handle_callbacks(data, use_pipeline=True)
 
 # ─────────────────────────────────────────────
