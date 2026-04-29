@@ -220,15 +220,16 @@ def cancel_cal_booking_for_lead(lead_id):
             print(f"[CAL CANCEL] No booking found for lead {lead_id}")
             return False, "not_found"
 
-        uid = target.get("uid")
+        booking_id = target.get("id")   # numeric ID, not uid
         cr = requests.delete(
-            f"https://api.cal.com/v1/bookings/{uid}/cancel",
+            f"https://api.cal.com/v1/bookings/{booking_id}/cancel",
             params={"apiKey": CAL_API_KEY},
+            json={"cancellationReason": "Rescheduled by host"},
             timeout=10
         )
         cr.raise_for_status()
-        print(f"[CAL CANCEL] Cancelled booking {uid} for lead {lead_id}")
-        return True, uid
+        print(f"[CAL CANCEL] Cancelled booking {booking_id} for lead {lead_id}")
+        return True, booking_id
     except Exception as e:
         print(f"[CAL CANCEL ERROR] {e}")
         return False, str(e)
