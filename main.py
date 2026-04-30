@@ -33,10 +33,10 @@ CONTRACT_ZAPIER_WEBHOOK  = os.environ.get("CONTRACT_ZAPIER_WEBHOOK")
 DEPOSIT_PAID_WEBHOOK     = os.environ.get("DEPOSIT_PAID_WEBHOOK")
 DELIVER_GALLERY_WEBHOOK  = os.environ.get("DELIVER_GALLERY_WEBHOOK")
 RETENTION_WEBHOOK        = os.environ.get("RETENTION_WEBHOOK")
-RETENTION_5B_WEBHOOK     = os.environ.get("RETENTION_5B_WEBHOOK")   # NEW — System 5B trigger
+RETENTION_5B_WEBHOOK     = os.environ.get("RETENTION_5B_WEBHOOK")
 
 # External Resources
-GOOGLE_REVIEW_LINK       = os.environ.get("GOOGLE_REVIEW_LINK", "https://g.page/r/YOUR_PLACE_ID/review")  # NEW
+GOOGLE_REVIEW_LINK       = os.environ.get("GOOGLE_REVIEW_LINK", "https://g.page/r/YOUR_PLACE_ID/review")
 
 # ─────────────────────────────────────────────
 # PH TIME HELPER
@@ -49,7 +49,8 @@ def ph_now():
 # ─────────────────────────────────────────────
 PIPELINE_STAGES = [
     "Inquiry", "Discovery Call Booked", "Discovery Call Completed",
-    "Proposal Sent", "Contracted", "Active Project", "Closed Won", "Closed Lost"
+    "Proposal Sent", "Contracted", "Active Project", "Delivered",
+    "Retention", "Closed Won", "Closed Lost"
 ]
 PROJECT_STAGES = [
     "Pre-Production", "Active", "Post-Production", "Delivered", "Completed", "Closed"
@@ -200,10 +201,6 @@ def send_client_msg(chat_id, text):
 # CAL.COM API HELPERS
 # ─────────────────────────────────────────────
 def cancel_cal_booking_for_lead(lead_id):
-    """
-    Search Cal.com v2 for an upcoming accepted booking matching lead_id and cancel it.
-    Uses bookingFieldsResponses.lead_id to match. Skips already-past bookings.
-    """
     if not CAL_API_KEY:
         print("[CAL CANCEL] CAL_API_KEY not set.")
         return False, "no_api_key"
@@ -263,7 +260,6 @@ def cancel_cal_booking_for_lead(lead_id):
 
 
 def fetch_cal_bookings(date_str):
-    """Fetch bookings for a given date via Cal.com v2 API."""
     if not CAL_API_KEY:
         print("[CAL] CAL_API_KEY not set.")
         return []
@@ -294,7 +290,6 @@ def fetch_cal_bookings(date_str):
 
 
 def parse_cal_booking(booking):
-    """Parse a Cal.com v2 booking object into a flat dict."""
     attendees    = booking.get("attendees", [])
     client_name  = attendees[0].get("name", "Unknown") if attendees else "Unknown"
     client_email = attendees[0].get("email", "—") if attendees else "—"
@@ -638,17 +633,19 @@ def _show_pipeline(chat_id, msg_id, target_id, method="edit", use_pipeline=False
     buttons     = [[{"text": f"➡️ {s}", "callback_data": f"upd_pipe|{target_id}|{s}"}] for s in next_stages]
     action_row = []
     if curr_stage == "Discovery Call Booked":
-        action_row = [{"text": "📞 Call Outcome",      "callback_data": f"call_menu|{target_id}"}]
+        action_row = [{"text": "📞 Call Outcome",       "callback_data": f"call_menu|{target_id}"}]
     elif curr_stage == "Discovery Call Completed":
-        action_row = [{"text": "📄 Send Proposal",     "callback_data": f"send_proposal|{target_id}"}]
+        action_row = [{"text": "📄 Send Proposal",      "callback_data": f"send_proposal|{target_id}"}]
     elif curr_stage == "Proposal Sent":
-        action_row = [{"text": "📝 Send Contract",     "callback_data": f"send_contract|{target_id}"}]
+        action_row = [{"text": "📝 Send Contract",      "callback_data": f"send_contract|{target_id}"}]
     elif curr_stage == "Contracted":
-        action_row = [{"text": "💰 Mark Deposit Paid", "callback_data": f"deposit_paid|{target_id}"}]
+        action_row = [{"text": "💰 Mark Deposit Paid",  "callback_data": f"deposit_paid|{target_id}"}]
     elif curr_stage == "Active Project":
-        action_row = [{"text": "🖼️ Deliver Gallery",  "callback_data": f"deliver_gallery|{target_id}"}]
+        action_row = [{"text": "📸 Mark Shoot Complete","callback_data": f"shoot_complete|{target_id}"}]
+    elif curr_stage == "Post-Production":
+        action_row = [{"text": "🖼️ Deliver Gallery",   "callback_data": f"deliver_gallery|{target_id}"}]
     elif curr_stage == "Delivered":
-        action_row = [{"text": "⭐ Run Retention",     "callback_data": f"trigger_retention|{target_id}"}]
+        action_row = [{"text": "⭐ Run Retention",      "callback_data": f"trigger_retention|{target_id}"}]
     if action_row:
         buttons.append(action_row)
     buttons.append([
@@ -670,9 +667,8 @@ def _show_project(chat_id, msg_id, lead_id, method="edit", use_pipeline=False):
     row = next((r for r in rows if safe_get(r, col, "Lead_ID") == lead_id), None)
     if not row:
         return send_msg(chat_id, f"❌ No project found for Lead `{lead_id}`.")
-    curr_stage = safe_get(row, col, "Current_Stage")
-    # FIX: Balance is now COL$K (was COL$J — overwritten by 3C Deposit_Paid)
-    balance_val = safe_get(row, col, "Balance")
+    curr_stage   = safe_get(row, col, "Current_Stage")
+    balance_val  = safe_get(row, col, "Balance")
     deposit_paid = safe_get(row, col, "Deposit_Paid")
     text = (
         f"🗂 *Project: {safe_get(row, col, 'Client_Name')}*\n"
@@ -692,8 +688,11 @@ def _show_project(chat_id, msg_id, lead_id, method="edit", use_pipeline=False):
     curr_idx    = PROJECT_STAGES.index(curr_stage) if curr_stage in PROJECT_STAGES else -1
     next_stages = PROJECT_STAGES[curr_idx + 1: curr_idx + 3]
     buttons     = [[{"text": f"➡️ {s}", "callback_data": f"upd_proj|{lead_id}|{s}"}] for s in next_stages]
-    # Contextual action button for current stage
-    if curr_stage == "Delivered":
+    if curr_stage == "Active":
+        buttons.append([{"text": "📸 Mark Shoot Complete", "callback_data": f"shoot_complete|{lead_id}"}])
+    elif curr_stage == "Post-Production":
+        buttons.append([{"text": "🖼️ Deliver Gallery", "callback_data": f"deliver_gallery|{lead_id}"}])
+    elif curr_stage == "Delivered":
         buttons.append([{"text": "⭐ Run Retention", "callback_data": f"trigger_retention|{lead_id}"}])
     buttons.append([
         {"text": "👤 View Lead", "callback_data": f"view_lead|{lead_id}"},
@@ -896,6 +895,126 @@ def _write_back(sheet_range_prefix, sheet_header_range, id_col, target_id, updat
     return False
 
 # ─────────────────────────────────────────────
+# SYSTEM 3C — DEPOSIT CONFIRMED HANDLER
+# No Zapier needed — runs directly in Railway
+# ─────────────────────────────────────────────
+def _handle_deposit_confirmed(lead_id, lead_name="—", project_id="—"):
+    today_str = ph_now().strftime("%Y-%m-%d")
+
+    _write_back("Projects", "Projects!A1:W200", "Lead_ID", lead_id, {
+        "Deposit_Paid":  "TRUE",
+        "Current_Stage": "Active"
+    })
+
+    _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", lead_id, {
+        "Current_Stage":    "Active Project",
+        "Last_Action":      "Deposit Received",
+        "Next_Action":      "Prepare for Shoot",
+        "Next_Action_Date": today_str
+    })
+
+    text = (
+        f"💰 *Deposit Confirmed*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 {lead_name}\n"
+        f"🆔 Lead: `{lead_id}` | Project: `{project_id}`\n"
+        f"📅 Paid: {today_str}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"✅ Deposit marked as paid.\n"
+        f"📊 Pipeline → *Active Project*\n"
+        f"➡️ Next: Prepare for Shoot"
+    )
+    buttons = [
+        [{"text": "🗂 View Project",  "callback_data": f"view_project|{lead_id}"}],
+        [{"text": "📊 View Pipeline", "callback_data": f"view_pipe|{lead_id}"}]
+    ]
+    requests.post(f"{PIPELINE_API}/sendMessage", json={
+        "chat_id":      CHAT_ID,
+        "text":         text,
+        "parse_mode":   "Markdown",
+        "reply_markup": {"inline_keyboard": buttons}
+    })
+
+# ─────────────────────────────────────────────
+# SYSTEM 4 — SHOOT COMPLETE HANDLER
+# ─────────────────────────────────────────────
+def _handle_shoot_complete(lead_id, lead_name="—", project_id="—"):
+    today_str = ph_now().strftime("%Y-%m-%d")
+
+    _write_back("Projects", "Projects!A1:W200", "Lead_ID", lead_id, {
+        "Shoot_Complete":  "TRUE",
+        "Current_Stage":   "Post-Production"
+    })
+
+    _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", lead_id, {
+        "Current_Stage":    "Post-Production",
+        "Last_Action":      "Shoot Completed",
+        "Next_Action":      "Edit & Deliver Gallery",
+        "Next_Action_Date": today_str
+    })
+
+    text = (
+        f"📸 *Shoot Marked Complete*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 {lead_name}\n"
+        f"🆔 Lead: `{lead_id}` | Project: `{project_id}`\n"
+        f"📅 Date: {today_str}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"✅ Shoot complete. Project → *Post-Production*\n"
+        f"When gallery is ready, tap below to deliver."
+    )
+    buttons = [
+        [{"text": "🖼️ Deliver Gallery", "callback_data": f"deliver_gallery|{lead_id}"}],
+        [{"text": "🗂 View Project",    "callback_data": f"view_project|{lead_id}"}]
+    ]
+    requests.post(f"{PIPELINE_API}/sendMessage", json={
+        "chat_id":      CHAT_ID,
+        "text":         text,
+        "parse_mode":   "Markdown",
+        "reply_markup": {"inline_keyboard": buttons}
+    })
+
+# ─────────────────────────────────────────────
+# SYSTEM 5A — CLIENT STATS CALCULATOR
+# ─────────────────────────────────────────────
+def _update_client_stats(lead_id):
+    """Recalculates LTV, bookings, and tier for a client. Called before firing 5A webhook."""
+    lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
+    lead_row  = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == lead_id), None)
+    if not lead_row:
+        return None
+    client_id = safe_get(lead_row, lead_col, "Client_ID")
+
+    proj_rows, proj_col = read_sheet_with_headers("Projects!A1:W200")
+    client_projects = [r for r in proj_rows if safe_get(r, proj_col, "Client_ID") == client_id]
+
+    total_ltv = 0
+    bookings  = len(client_projects)
+    for p in client_projects:
+        try:
+            total_ltv += float(
+                str(safe_get(p, proj_col, "Total_Price"))
+                .replace(",", "").replace("$", "") or 0
+            )
+        except ValueError:
+            pass
+
+    if bookings >= 3 or total_ltv >= 50000:
+        tier = "VIP"
+    elif bookings >= 2 or total_ltv >= 20000:
+        tier = "Premium"
+    else:
+        tier = "Standard"
+
+    _write_back("Clients", "Clients!A1:H200", "Client_ID", client_id, {
+        "LTV":         str(int(total_ltv)),
+        "Bookings":    str(bookings),
+        "Client_Tier": tier
+    })
+
+    return {"ltv": int(total_ltv), "bookings": bookings, "tier": tier}
+
+# ─────────────────────────────────────────────
 # SHARED CALLBACK HANDLER
 # ─────────────────────────────────────────────
 def handle_callbacks(data, use_pipeline=False):
@@ -983,7 +1102,6 @@ def handle_callbacks(data, use_pipeline=False):
 
     elif action == "send_proposal":
         fired = fire_webhook(PROPOSAL_ZAPIER_WEBHOOK, {"lead_id": target_id})
-        api = PIPELINE_API if use_pipeline else DASHBOARD_API
         answer_callback(cb["id"], "📄 Proposal triggered", use_pipeline)
         msg_text = (
             f"📄 Proposal generation triggered for `{target_id}`\nCheck your email and Telegram for confirmation."
@@ -1003,7 +1121,6 @@ def handle_callbacks(data, use_pipeline=False):
         lead_row = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == target_id), None)
         budget   = safe_get(lead_row, lead_col, "Budget").strip() if lead_row else ""
         name     = safe_get(lead_row, lead_col, "Full_Name") if lead_row else target_id
-        api      = PIPELINE_API if use_pipeline else DASHBOARD_API
 
         if budget in UNCERTAIN_BUDGETS:
             answer_callback(cb["id"], "Budget unclear — enter exact amount below", use_pipeline)
@@ -1111,65 +1228,88 @@ def handle_callbacks(data, use_pipeline=False):
         else:
             edit_msg(chat_id, msg_id, prompt_text)
 
+    # ── SYSTEM 3C — Deposit Paid (no Zapier, runs directly) ──
     elif action == "deposit_paid":
-        # FIX: Look up project_id from Pipeline Tracker to include in webhook payload
         pipe_rows, pipe_col = read_sheet_with_headers("Pipeline Tracker!A1:L200")
         pipe_row   = next((r for r in pipe_rows if safe_get(r, pipe_col, "Lead_ID") == target_id), None)
         project_id = safe_get(pipe_row, pipe_col, "Project_ID") if pipe_row else "—"
+        lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
+        lead_row   = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == target_id), None)
+        lead_name  = safe_get(lead_row, lead_col, "Full_Name") if lead_row else "—"
 
-        fired = fire_webhook(DEPOSIT_PAID_WEBHOOK, {
-            "lead_id":    target_id,
-            "project_id": project_id  # FIX: was missing — 3C needs this for COL$B write
-        })
-        answer_callback(cb["id"], "💰 Deposit marked as paid", use_pipeline)
-        msg_text = (
-            f"💰 *Deposit Paid — `{target_id}`*\n"
-            f"Project: `{project_id}`\n\n"
-            f"✅ Sheets updated via System 3C.\nPipeline → Active Project."
-        ) if fired else (
-            f"⚠️ Webhook failed — check DEPOSIT_PAID_WEBHOOK in Railway."
-        )
-        send_msg(chat_id, msg_text)
+        answer_callback(cb["id"], "💰 Deposit confirmed — updating records", use_pipeline)
+        _handle_deposit_confirmed(target_id, lead_name, project_id)
 
+    # ── SYSTEM 4 — Shoot Complete ──
+    elif action == "shoot_complete":
+        pipe_rows, pipe_col = read_sheet_with_headers("Pipeline Tracker!A1:L200")
+        pipe_row   = next((r for r in pipe_rows if safe_get(r, pipe_col, "Lead_ID") == target_id), None)
+        project_id = safe_get(pipe_row, pipe_col, "Project_ID") if pipe_row else "—"
+        lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
+        lead_row   = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == target_id), None)
+        lead_name  = safe_get(lead_row, lead_col, "Full_Name") if lead_row else "—"
+
+        answer_callback(cb["id"], "📸 Shoot marked complete", use_pipeline)
+        _handle_shoot_complete(target_id, lead_name, project_id)
+
+    # ── SYSTEM 4 — Deliver Gallery ──
     elif action == "deliver_gallery":
-        send_msg(chat_id,
-            f"📁 To deliver the gallery for `{target_id}`, send:\n\n"
+        send_pipeline_msg(chat_id,
+            f"📁 *Deliver Gallery — `{target_id}`*\n\n"
+            f"Send the Drive folder URL using:\n"
             f"`/deliver {target_id} <google_drive_folder_url>`\n\n"
             f"Example:\n`/deliver {target_id} https://drive.google.com/drive/folders/...`"
         )
 
+    # ── SYSTEM 5A — Trigger Retention ──
     elif action == "trigger_retention":
-        # Fetch enriched data from Sheets before firing webhook
         lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
         lead_row = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == target_id), None)
         proj_rows, proj_col = read_sheet_with_headers("Projects!A1:W200")
         proj_row = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == target_id), None)
         pipe_rows, pipe_col = read_sheet_with_headers("Pipeline Tracker!A1:L200")
         pipe_row   = next((r for r in pipe_rows if safe_get(r, pipe_col, "Lead_ID") == target_id), None)
-        project_id = safe_get(pipe_row, pipe_col, "Project_ID") if pipe_row else "—"
+        project_id   = safe_get(pipe_row, pipe_col, "Project_ID")  if pipe_row else "—"
+        client_name  = safe_get(lead_row, lead_col, "Full_Name")   if lead_row else "—"
+        client_email = safe_get(lead_row, lead_col, "Email")        if lead_row else "—"
+        event_type   = safe_get(lead_row, lead_col, "Event_Type")   if lead_row else "—"
 
-        client_name  = safe_get(lead_row, lead_col, "Full_Name")  if lead_row else "—"
-        client_email = safe_get(lead_row, lead_col, "Email")       if lead_row else "—"
-        event_type   = safe_get(lead_row, lead_col, "Event_Type")  if lead_row else "—"
+        stats    = _update_client_stats(target_id)
+        new_ltv  = stats["ltv"]      if stats else "—"
+        new_tier = stats["tier"]     if stats else "—"
+        bookings = stats["bookings"] if stats else "—"
+
+        today_str = ph_now().strftime("%Y-%m-%d")
+        _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", target_id, {
+            "Current_Stage":    "Retention",
+            "Last_Action":      "Gallery Delivered",
+            "Next_Action":      "Await Review",
+            "Next_Action_Date": today_str
+        })
 
         fired = fire_webhook(RETENTION_WEBHOOK, {
             "lead_id":      target_id,
             "project_id":   project_id,
             "client_name":  client_name,
             "client_email": client_email,
-            "event_type":   event_type
+            "event_type":   event_type,
+            "new_ltv":      new_ltv,
+            "new_tier":     new_tier,
+            "bookings":     bookings
         })
+
         answer_callback(cb["id"], "⭐ Retention triggered", use_pipeline)
         msg_text = (
             f"⭐ *Retention Sequence Triggered*\n"
             f"Lead: `{target_id}` | {client_name}\n\n"
             f"• Review request email queued\n"
             f"• Rebooking upsell scheduled for +7 days\n"
+            f"• Client LTV updated → ${new_ltv} | {new_tier}\n"
             f"• Watch Telegram for confirmation"
         ) if fired else (
             f"⚠️ Webhook failed — check RETENTION_WEBHOOK in Railway."
         )
-        send_msg(chat_id, msg_text)
+        send_pipeline_msg(chat_id, msg_text)
 
     return jsonify({"status": "ok"})
 
@@ -1242,11 +1382,24 @@ def dashboard():
                 send_msg(chat_id, "Usage: /deliver <Lead_ID> <google_drive_folder_url>")
                 return jsonify({"status": "ok"})
             lead_id, gallery_url = parts[1], parts[2]
-            # Enrich payload with client data from Sheets
             lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
-            lead_row   = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == lead_id), None)
+            lead_row     = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == lead_id), None)
             client_name  = safe_get(lead_row, lead_col, "Full_Name") if lead_row else "—"
             client_email = safe_get(lead_row, lead_col, "Email")      if lead_row else "—"
+
+            # Update Projects sheet immediately before Zapier runs
+            today_str = ph_now().strftime("%Y-%m-%d")
+            _write_back("Projects", "Projects!A1:W200", "Lead_ID", lead_id, {
+                "Current_Stage": "Delivered",
+                "Delivery_Date": today_str
+            })
+            _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", lead_id, {
+                "Current_Stage":    "Delivered",
+                "Last_Action":      "Gallery Delivered",
+                "Next_Action":      "Send Retention Email",
+                "Next_Action_Date": today_str
+            })
+
             fired = fire_webhook(DELIVER_GALLERY_WEBHOOK, {
                 "lead_id":      lead_id,
                 "gallery_url":  gallery_url,
@@ -1254,7 +1407,13 @@ def dashboard():
                 "client_email": client_email
             })
             if fired:
-                send_msg(chat_id, f"🖼️ Gallery delivery triggered for `{lead_id}`\n📁 {gallery_url}\n\nClient email + Zoho invoice queued.")
+                send_msg(chat_id,
+                    f"🖼️ *Gallery Delivery Triggered*\n"
+                    f"Lead: `{lead_id}` | {client_name}\n"
+                    f"📁 {gallery_url}\n\n"
+                    f"✅ Sheets updated. Client email + balance invoice queued via Zapier.\n"
+                    f"Pipeline → *Delivered*"
+                )
             else:
                 send_msg(chat_id, "⚠️ Webhook failed — check DELIVER_GALLERY_WEBHOOK in Railway.")
         elif text.startswith("/retention"):
@@ -1263,7 +1422,6 @@ def dashboard():
                 send_msg(chat_id, "Usage: /retention <Lead_ID>")
                 return jsonify({"status": "ok"})
             lead_id = parts[1]
-            # Enrich payload with client + project data from Sheets
             lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
             lead_row   = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == lead_id), None)
             pipe_rows, pipe_col = read_sheet_with_headers("Pipeline Tracker!A1:L200")
@@ -1272,15 +1430,37 @@ def dashboard():
             client_name  = safe_get(lead_row, lead_col, "Full_Name")   if lead_row else "—"
             client_email = safe_get(lead_row, lead_col, "Email")        if lead_row else "—"
             event_type   = safe_get(lead_row, lead_col, "Event_Type")   if lead_row else "—"
+
+            stats    = _update_client_stats(lead_id)
+            new_ltv  = stats["ltv"]      if stats else "—"
+            new_tier = stats["tier"]     if stats else "—"
+            bookings = stats["bookings"] if stats else "—"
+
+            today_str = ph_now().strftime("%Y-%m-%d")
+            _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", lead_id, {
+                "Current_Stage":    "Retention",
+                "Last_Action":      "Gallery Delivered",
+                "Next_Action":      "Await Review",
+                "Next_Action_Date": today_str
+            })
+
             fired = fire_webhook(RETENTION_WEBHOOK, {
                 "lead_id":      lead_id,
                 "project_id":   project_id,
                 "client_name":  client_name,
                 "client_email": client_email,
-                "event_type":   event_type
+                "event_type":   event_type,
+                "new_ltv":      new_ltv,
+                "new_tier":     new_tier,
+                "bookings":     bookings
             })
             if fired:
-                send_msg(chat_id, f"⭐ Retention sequence triggered for `{lead_id}`\nReview request email sent. Rebooking upsell queued for +7 days.")
+                send_msg(chat_id,
+                    f"⭐ *Retention sequence triggered for `{lead_id}`*\n"
+                    f"Review request email queued.\n"
+                    f"Rebooking upsell scheduled +7 days.\n"
+                    f"Client LTV: ${new_ltv} | Tier: {new_tier}"
+                )
             else:
                 send_msg(chat_id, "⚠️ Webhook failed — check RETENTION_WEBHOOK in Railway.")
         elif text.startswith("/setbudget"):
@@ -1472,17 +1652,12 @@ def proposal_notify():
     })
     return jsonify({"status": "ok"})
 
-
 # ─────────────────────────────────────────────
-# NEW ROUTE: /invoice_sent  (called by System 3B)
+# SYSTEM 3B — /invoice_sent
+# Called by Zapier after SignWell contract is signed
 # ─────────────────────────────────────────────
 @app.route("/invoice_sent", methods=["POST"])
 def invoice_sent():
-    """
-    Called by System 3B (Zapier) after SignNow contract is signed.
-    Notifies Victoria that the deposit invoice has been sent via Zoho
-    and prompts her to mark it as paid when Zoho confirms payment.
-    """
     data         = request.json
     lead_id      = data.get("lead_id",      "—")
     lead_name    = data.get("lead_name",    "—")
@@ -1517,17 +1692,63 @@ def invoice_sent():
     })
     return jsonify({"status": "ok"})
 
+# ─────────────────────────────────────────────
+# SYSTEM 3C — /deposit_confirmed
+# Fallback HTTP route (same logic as callback)
+# ─────────────────────────────────────────────
+@app.route("/deposit_confirmed", methods=["POST"])
+def deposit_confirmed():
+    data       = request.json
+    lead_id    = data.get("lead_id",    "—")
+    lead_name  = data.get("lead_name",  "—")
+    project_id = data.get("project_id", "—")
+    _handle_deposit_confirmed(lead_id, lead_name, project_id)
+    return jsonify({"status": "ok"})
 
 # ─────────────────────────────────────────────
-# NEW ROUTE: /retention_notify  (called by System 5A)
+# SYSTEM 4 — /gallery_notify
+# Called by Zapier 4 after gallery email + balance invoice are sent
+# ─────────────────────────────────────────────
+@app.route("/gallery_notify", methods=["POST"])
+def gallery_notify():
+    data         = request.json
+    lead_id      = data.get("lead_id",      "—")
+    lead_name    = data.get("lead_name",    "—")
+    project_id   = data.get("project_id",   "—")
+    gallery_url  = data.get("gallery_url",  "—")
+    delivery_date = data.get("delivery_date", ph_now().strftime("%Y-%m-%d"))
+
+    text = (
+        f"🖼️ *Gallery Delivered*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 {lead_name}\n"
+        f"🆔 Lead: `{lead_id}` | Project: `{project_id}`\n"
+        f"📅 Delivered: {delivery_date}\n"
+        f"📁 [View Gallery]({gallery_url})\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"✅ Gallery email sent to client.\n"
+        f"💳 Balance invoice sent via Zoho.\n"
+        f"When ready, run the retention sequence."
+    )
+    buttons = [
+        [{"text": "⭐ Run Retention",  "callback_data": f"trigger_retention|{lead_id}"}],
+        [{"text": "🗂 View Project",   "callback_data": f"view_project|{lead_id}"}],
+        [{"text": "📊 View Pipeline",  "callback_data": f"view_pipe|{lead_id}"}]
+    ]
+    requests.post(f"{PIPELINE_API}/sendMessage", json={
+        "chat_id":      CHAT_ID,
+        "text":         text,
+        "parse_mode":   "Markdown",
+        "reply_markup": {"inline_keyboard": buttons}
+    })
+    return jsonify({"status": "ok"})
+
+# ─────────────────────────────────────────────
+# SYSTEM 5A — /retention_notify
+# Called by Zapier 5A after review request email is sent
 # ─────────────────────────────────────────────
 @app.route("/retention_notify", methods=["POST"])
 def retention_notify():
-    """
-    Called by System 5A (Zapier) after review request email is sent.
-    Confirms retention triggered + shows updated client LTV/tier stats.
-    System 5A also passes client data through to System 5B webhook.
-    """
     data        = request.json
     lead_id     = data.get("lead_id",     "—")
     client_name = data.get("client_name", "—")
@@ -1538,6 +1759,14 @@ def retention_notify():
     bookings    = data.get("bookings",    "—")
 
     tier_emoji = {"VIP": "⭐", "Premium": "💎", "Standard": "🔹"}.get(new_tier, "👤")
+
+    # Update Projects → Completed + Review_Sent flag
+    today_str = ph_now().strftime("%Y-%m-%d")
+    _write_back("Projects", "Projects!A1:W200", "Lead_ID", lead_id, {
+        "Current_Stage":    "Completed",
+        "Review_Sent":      "TRUE",
+        "Review_Sent_Date": today_str
+    })
 
     text = (
         f"⭐ *Retention Sequence Triggered*\n"
@@ -1551,6 +1780,53 @@ def retention_notify():
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"✅ Review request sent.\n"
         f"📧 Rebooking email queued for +7 days."
+    )
+    buttons = [
+        [{"text": "👤 View Lead",    "callback_data": f"view_lead|{lead_id}"}],
+        [{"text": "🗂 View Project", "callback_data": f"view_project|{lead_id}"}]
+    ]
+    requests.post(f"{PIPELINE_API}/sendMessage", json={
+        "chat_id":      CHAT_ID,
+        "text":         text,
+        "parse_mode":   "Markdown",
+        "reply_markup": {"inline_keyboard": buttons}
+    })
+    return jsonify({"status": "ok"})
+
+# ─────────────────────────────────────────────
+# SYSTEM 5B — /retention_5b_notify
+# Called by Zapier 5B after rebooking upsell email is sent (+7 days)
+# ─────────────────────────────────────────────
+@app.route("/retention_5b_notify", methods=["POST"])
+def retention_5b_notify():
+    data        = request.json
+    lead_id     = data.get("lead_id",     "—")
+    client_name = data.get("client_name", "—")
+    project_id  = data.get("project_id",  "—")
+    event_type  = data.get("event_type",  "—")
+
+    today_str = ph_now().strftime("%Y-%m-%d")
+
+    _write_back("Projects", "Projects!A1:W200", "Lead_ID", lead_id, {
+        "Upsell_Sent": "TRUE"
+    })
+
+    _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", lead_id, {
+        "Current_Stage":    "Closed Won",
+        "Last_Action":      "Rebooking Email Sent",
+        "Next_Action":      "Monitor for Rebook",
+        "Next_Action_Date": today_str
+    })
+
+    text = (
+        f"📧 *Rebooking Email Sent — System 5B*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 {client_name}\n"
+        f"🆔 Lead: `{lead_id}` | Project: `{project_id}`\n"
+        f"📸 Event: {event_type}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"✅ Rebooking upsell email delivered.\n"
+        f"📊 Pipeline → *Closed Won*"
     )
     buttons = [
         [{"text": "👤 View Lead",    "callback_data": f"view_lead|{lead_id}"}],
