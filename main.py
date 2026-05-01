@@ -147,6 +147,7 @@ def answer_callback(cb_id, text, use_pipeline=False):
 
 # ─────────────────────────────────────────────
 # TELEGRAM SEND/EDIT HELPERS
+# FIX: edit_pipeline_msg now includes parse_mode — was silently failing before
 # ─────────────────────────────────────────────
 def send_msg(chat_id, text, reply_markup=None):
     payload = {
@@ -172,10 +173,12 @@ def edit_msg(chat_id, message_id, text, reply_markup=None):
     requests.post(f"{DASHBOARD_API}/editMessageText", json=payload)
 
 def edit_pipeline_msg(chat_id, message_id, text, reply_markup=None):
+    # FIX: Added parse_mode — previously missing, causing all pipeline edits to silently fail
     payload = {
         "chat_id": chat_id,
         "message_id": message_id,
         "text": text,
+        "parse_mode": "Markdown",
     }
     if reply_markup:
         payload["reply_markup"] = reply_markup
@@ -196,6 +199,28 @@ def send_client_msg(chat_id, text):
         "chat_id": chat_id,
         "text": text
     })
+
+# ─────────────────────────────────────────────
+# SMART SEND/EDIT HELPER
+# Chooses edit vs send based on whether msg_id is present
+# Chooses pipeline vs dashboard API based on use_pipeline flag
+# ─────────────────────────────────────────────
+def smart_send(chat_id, text, markup=None, msg_id=None, use_pipeline=False):
+    """
+    If msg_id is provided → edit in place (no new message spam).
+    If not → send new message.
+    Respects use_pipeline flag for correct bot selection.
+    """
+    if msg_id:
+        if use_pipeline:
+            edit_pipeline_msg(chat_id, msg_id, text, markup)
+        else:
+            edit_msg(chat_id, msg_id, text, markup)
+    else:
+        if use_pipeline:
+            send_pipeline_msg(chat_id, text, markup)
+        else:
+            send_msg(chat_id, text, markup)
 
 # ─────────────────────────────────────────────
 # CAL.COM API HELPERS
@@ -324,6 +349,7 @@ def parse_cal_booking(booking):
 
 # ─────────────────────────────────────────────
 # COMMAND HANDLERS
+# FIX: All nav handlers now accept msg_id + use_pipeline for in-place editing
 # ─────────────────────────────────────────────
 def handle_start_command(chat_id):
     text = (
@@ -382,10 +408,12 @@ def handle_menu_command(chat_id):
     ]
     send_msg(chat_id, text, {"inline_keyboard": buttons})
 
-def handle_leads_command(chat_id):
+
+# FIX: Added msg_id + use_pipeline params — nav callbacks now edit in-place
+def handle_leads_command(chat_id, msg_id=None, use_pipeline=False):
     rows, col = read_sheet_with_headers("Leads!A1:T200")
     if not rows:
-        return send_msg(chat_id, "📭 No leads found.")
+        return smart_send(chat_id, "📭 No leads found.", msg_id=msg_id, use_pipeline=use_pipeline)
     lines = ["📋 *LEADS OVERVIEW* (latest 10)\n"]
     buttons = []
     for row in rows[:10]:
@@ -399,13 +427,15 @@ def handle_leads_command(chat_id):
         {"text": "🔴 HOT Only", "callback_data": "nav_hot|none"},
         {"text": "📊 Pipeline", "callback_data": "nav_pipe|none"}
     ])
-    send_msg(chat_id, "\n".join(lines), {"inline_keyboard": buttons})
+    smart_send(chat_id, "\n".join(lines), {"inline_keyboard": buttons}, msg_id=msg_id, use_pipeline=use_pipeline)
 
-def handle_hot_command(chat_id):
+
+# FIX: Added msg_id + use_pipeline params
+def handle_hot_command(chat_id, msg_id=None, use_pipeline=False):
     rows, col = read_sheet_with_headers("Leads!A1:T200")
     hot_rows = [r for r in rows if safe_get(r, col, "Lead_Status").upper() == "HOT"]
     if not hot_rows:
-        return send_msg(chat_id, "🔴 No HOT leads right now.")
+        return smart_send(chat_id, "🔴 No HOT leads right now.", msg_id=msg_id, use_pipeline=use_pipeline)
     lines = [f"🔴 *HOT LEADS* ({len(hot_rows)} total)\n"]
     buttons = []
     for row in hot_rows[:10]:
@@ -416,9 +446,11 @@ def handle_hot_command(chat_id):
         lines.append(f"• 🔴 *{name}* (`{lid}`)\n  └ {event} on {date}")
         buttons.append([{"text": f"🔴 {name}", "callback_data": f"view_lead|{lid}"}])
     buttons.append([{"text": "⬅️ All Leads", "callback_data": "nav_leads|none"}])
-    send_msg(chat_id, "\n".join(lines), {"inline_keyboard": buttons})
+    smart_send(chat_id, "\n".join(lines), {"inline_keyboard": buttons}, msg_id=msg_id, use_pipeline=use_pipeline)
 
-def handle_today_command(chat_id):
+
+# FIX: Added msg_id + use_pipeline params
+def handle_today_command(chat_id, msg_id=None, use_pipeline=False):
     today_str     = ph_now().strftime("%Y-%m-%d")
     today_display = ph_now().strftime("%B %d, %Y")
     rows, col = read_sheet_with_headers("Leads!A1:T200")
@@ -438,9 +470,11 @@ def handle_today_command(chat_id):
         {"text": "📅 Today's Calls", "callback_data": "nav_schedule|today"},
         {"text": "⬅️ All Leads",     "callback_data": "nav_leads|none"}
     ])
-    send_msg(chat_id, "\n".join(lines), {"inline_keyboard": buttons})
+    smart_send(chat_id, "\n".join(lines), {"inline_keyboard": buttons}, msg_id=msg_id, use_pipeline=use_pipeline)
 
-def handle_schedule_command(chat_id, date_str=None, date_label=None):
+
+# FIX: Added msg_id + use_pipeline params
+def handle_schedule_command(chat_id, date_str=None, date_label=None, msg_id=None, use_pipeline=False):
     now = ph_now()
     if not date_str:
         date_str   = now.strftime("%Y-%m-%d")
@@ -482,13 +516,21 @@ def handle_schedule_command(chat_id, date_str=None, date_label=None):
             {"text": "⬅️ Today",     "callback_data": "nav_schedule|today"},
             {"text": "📋 All Leads", "callback_data": "nav_leads|none"}
         ])
-    send_msg(chat_id, "\n".join(lines), {"inline_keyboard": buttons})
+    smart_send(chat_id, "\n".join(lines), {"inline_keyboard": buttons}, msg_id=msg_id, use_pipeline=use_pipeline)
 
-def handle_tomorrow_command(chat_id):
+
+# FIX: Added msg_id + use_pipeline params
+def handle_tomorrow_command(chat_id, msg_id=None, use_pipeline=False):
     tomorrow     = ph_now() + timedelta(days=1)
     tomorrow_str = tomorrow.strftime("%Y-%m-%d")
     tomorrow_lbl = tomorrow.strftime("%B %d, %Y")
-    handle_schedule_command(chat_id, date_str=tomorrow_str, date_label=f"Tomorrow — {tomorrow_lbl}")
+    handle_schedule_command(
+        chat_id,
+        date_str=tomorrow_str,
+        date_label=f"Tomorrow — {tomorrow_lbl}",
+        msg_id=msg_id,
+        use_pipeline=use_pipeline
+    )
 
 def handle_search_command(chat_id, query):
     if not query:
@@ -515,10 +557,12 @@ def handle_search_command(chat_id, query):
     buttons.append([{"text": "⬅️ All Leads", "callback_data": "nav_leads|none"}])
     send_msg(chat_id, "\n".join(lines), {"inline_keyboard": buttons})
 
+
+# FIX: Pipeline command properly edits in-place when msg_id provided
 def handle_pipeline_command(chat_id, msg_id=None, use_pipeline=False):
     rows, col = read_sheet_with_headers("Pipeline Tracker!A1:L200")
     if not rows:
-        return send_msg(chat_id, "📭 Pipeline is empty.")
+        return smart_send(chat_id, "📭 Pipeline is empty.", msg_id=msg_id, use_pipeline=use_pipeline)
     lines = ["📊 *PIPELINE SNAPSHOT*\n"]
     buttons = []
     for row in rows[:10]:
@@ -532,21 +576,14 @@ def handle_pipeline_command(chat_id, msg_id=None, use_pipeline=False):
         {"text": "📋 All Leads", "callback_data": "nav_leads|none"},
         {"text": "🗂 Projects",  "callback_data": "nav_projects|none"}
     ])
-    markup = {"inline_keyboard": buttons}
-    text   = "\n".join(lines)
-    if msg_id and use_pipeline:
-        edit_pipeline_msg(chat_id, msg_id, text, markup)
-    elif msg_id:
-        edit_msg(chat_id, msg_id, text, markup)
-    elif use_pipeline:
-        send_pipeline_msg(chat_id, text, markup)
-    else:
-        send_msg(chat_id, text, markup)
+    smart_send(chat_id, "\n".join(lines), {"inline_keyboard": buttons}, msg_id=msg_id, use_pipeline=use_pipeline)
 
-def handle_project_command(chat_id):
+
+# FIX: Added msg_id + use_pipeline params
+def handle_project_command(chat_id, msg_id=None, use_pipeline=False):
     rows, col = read_sheet_with_headers("Projects!A1:Z200")
     if not rows:
-        return send_msg(chat_id, "📭 No projects found.")
+        return smart_send(chat_id, "📭 No projects found.", msg_id=msg_id, use_pipeline=use_pipeline)
     active = [r for r in rows if safe_get(r, col, "Current_Stage") not in ("Closed", "Completed")]
     lines = [f"🗂 *ACTIVE PROJECTS* ({len(active)} total)\n"]
     buttons = []
@@ -561,7 +598,7 @@ def handle_project_command(chat_id):
     if not active:
         lines.append("No active projects at the moment.")
     buttons.append([{"text": "📊 Pipeline", "callback_data": "nav_pipe|none"}])
-    send_msg(chat_id, "\n".join(lines), {"inline_keyboard": buttons})
+    smart_send(chat_id, "\n".join(lines), {"inline_keyboard": buttons}, msg_id=msg_id, use_pipeline=use_pipeline)
 
 def handle_client_command(chat_id, client_id):
     if not client_id:
@@ -608,13 +645,8 @@ def _show_lead(chat_id, msg_id, target_id, method="edit", use_pipeline=False):
         [{"text": "⬅️ Back to Leads", "callback_data": "nav_leads|none"}]
     ]
     markup = {"inline_keyboard": buttons}
-    if method == "edit" and msg_id:
-        if use_pipeline:
-            edit_pipeline_msg(chat_id, msg_id, text, markup)
-        else:
-            edit_msg(chat_id, msg_id, text, markup)
-    else:
-        send_msg(chat_id, text, markup)
+    smart_send(chat_id, text, markup, msg_id=msg_id if method == "edit" else None, use_pipeline=use_pipeline)
+
 
 def _show_pipeline(chat_id, msg_id, target_id, method="edit", use_pipeline=False):
     rows, col = read_sheet_with_headers("Pipeline Tracker!A1:L200")
@@ -633,39 +665,41 @@ def _show_pipeline(chat_id, msg_id, target_id, method="edit", use_pipeline=False
         f"📞 Call Status: {safe_get(row, col, 'Call_Status')}\n"
         f"📝 Proposal: {safe_get(row, col, 'Proposal_Status')}"
     )
+
+    # FIX: Only show next pipeline stages when the current stage is actually in PIPELINE_STAGES
+    # Previously: None + 1 would crash; or stage not found would show wrong stages
     curr_idx    = PIPELINE_STAGES.index(curr_stage) if curr_stage in PIPELINE_STAGES else None
     next_stages = PIPELINE_STAGES[curr_idx + 1: curr_idx + 4] if curr_idx is not None else []
-    buttons     = [[{"text": f"➡️ {s}", "callback_data": f"upd_pipe|{target_id}|{s}"}] for s in next_stages]
+
+    buttons = [[{"text": f"➡️ {s}", "callback_data": f"upd_pipe|{target_id}|{s}"}] for s in next_stages]
+
+    # Contextual action button — one clear CTA per stage
     action_row = []
     if curr_stage == "Discovery Call Booked":
-        action_row = [{"text": "📞 Call Outcome",           "callback_data": f"call_menu|{target_id}"}]
+        action_row = [{"text": "📞 Log Call Outcome",        "callback_data": f"call_menu|{target_id}"}]
     elif curr_stage == "Discovery Call Completed":
-        action_row = [{"text": "📄 Send Proposal",          "callback_data": f"send_proposal|{target_id}"}]
+        action_row = [{"text": "📄 Send Proposal",           "callback_data": f"send_proposal|{target_id}"}]
     elif curr_stage == "Proposal Sent":
-        action_row = [{"text": "📝 Send Contract",          "callback_data": f"send_contract|{target_id}"}]
+        action_row = [{"text": "📝 Send Contract",           "callback_data": f"send_contract|{target_id}"}]
     elif curr_stage == "Contracted":
-        action_row = [{"text": "💰 Mark Deposit Paid",      "callback_data": f"deposit_paid|{target_id}"}]
+        action_row = [{"text": "💰 Mark Deposit Paid",       "callback_data": f"deposit_paid|{target_id}"}]
     elif curr_stage == "Active Project":
-        action_row = [{"text": "📸 Mark Shoot Complete",    "callback_data": f"shoot_complete|{target_id}"}]
+        action_row = [{"text": "📸 Mark Shoot Complete",     "callback_data": f"shoot_complete|{target_id}"}]
     elif curr_stage == "Post-Production":
-        action_row = [{"text": "✅ Gallery Ready to Ship?", "callback_data": f"gallery_ready|{target_id}"}]
+        action_row = [{"text": "✅ Gallery Ready to Ship?",  "callback_data": f"gallery_ready|{target_id}"}]
     elif curr_stage == "Delivered":
-        action_row = [{"text": "⭐ Run Retention",          "callback_data": f"trigger_retention|{target_id}"}]
+        action_row = [{"text": "⭐ Run Retention",           "callback_data": f"trigger_retention|{target_id}"}]
     if action_row:
         buttons.append(action_row)
+
     buttons.append([
         {"text": "👤 View Lead", "callback_data": f"view_lead|{target_id}"},
         {"text": "🗂 Project",   "callback_data": f"view_project|{target_id}"}
     ])
     buttons.append([{"text": "⬅️ Back to Pipeline", "callback_data": "nav_pipe|none"}])
     markup = {"inline_keyboard": buttons}
-    if method == "edit" and msg_id:
-        if use_pipeline:
-            edit_pipeline_msg(chat_id, msg_id, text, markup)
-        else:
-            edit_msg(chat_id, msg_id, text, markup)
-    else:
-        send_msg(chat_id, text, markup)
+    smart_send(chat_id, text, markup, msg_id=msg_id if method == "edit" else None, use_pipeline=use_pipeline)
+
 
 def _show_project(chat_id, msg_id, lead_id, method="edit", use_pipeline=False):
     rows, col = read_sheet_with_headers("Projects!A1:Z200")
@@ -692,8 +726,9 @@ def _show_project(chat_id, msg_id, lead_id, method="edit", use_pipeline=False):
         f"📦 Delivered: {safe_get(row, col, 'Delivery_Date')}\n"
         f"⭐ Review Sent: {safe_get(row, col, 'Review_Sent') if 'Review_Sent' in col else safe_get(row, col, 'Review')}"
     )
-    # Calculate days since event and append status line for Post-Production
-    event_date_raw = safe_get(row, col, "Event_Date")
+
+    # Days since event (positive = past, negative = future) — useful distinction for Victoria
+    event_date_raw   = safe_get(row, col, "Event_Date")
     days_since_event = None
     try:
         for fmt in ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y", "%Y-%m-%d"):
@@ -706,30 +741,30 @@ def _show_project(chat_id, msg_id, lead_id, method="edit", use_pipeline=False):
     except Exception:
         pass
 
+    # Append stage-specific status line
     if curr_stage == "Post-Production" and days_since_event is not None:
-        text += f"\n\n⏳ *Still in post-production — {days_since_event} day(s) since the event.*"
+        if days_since_event >= 0:
+            text += f"\n\n⏳ *In post-production — {days_since_event} day(s) since the event.*"
+        else:
+            text += f"\n\n📅 *Event is in {abs(days_since_event)} day(s). Not happened yet.*"
 
     buttons = []
     if curr_stage == "Active":
-        buttons.append([{"text": "📸 Mark Shoot Complete", "callback_data": f"shoot_complete|{lead_id}"}])
+        buttons.append([{"text": "📸 Mark Shoot Complete",  "callback_data": f"shoot_complete|{lead_id}"}])
     elif curr_stage == "Post-Production":
         buttons.append([{"text": "✅ Gallery Ready to Ship?", "callback_data": f"gallery_ready|{lead_id}"}])
     elif curr_stage == "Delivered":
         buttons.append([{"text": "⭐ Run Retention",  "callback_data": f"trigger_retention|{lead_id}"}])
-        buttons.append([{"text": "➡️ Completed",      "callback_data": f"upd_proj|{lead_id}|Completed"}])
+        buttons.append([{"text": "➡️ Mark Completed", "callback_data": f"upd_proj|{lead_id}|Completed"}])
+
     buttons.append([
         {"text": "👤 View Lead", "callback_data": f"view_lead|{lead_id}"},
         {"text": "📊 Pipeline",  "callback_data": f"view_pipe|{lead_id}"}
     ])
     buttons.append([{"text": "⬅️ Projects List", "callback_data": "nav_projects|none"}])
     markup = {"inline_keyboard": buttons}
-    if method == "edit" and msg_id:
-        if use_pipeline:
-            edit_pipeline_msg(chat_id, msg_id, text, markup)
-        else:
-            edit_msg(chat_id, msg_id, text, markup)
-    else:
-        send_msg(chat_id, text, markup)
+    smart_send(chat_id, text, markup, msg_id=msg_id if method == "edit" else None, use_pipeline=use_pipeline)
+
 
 def _show_client(chat_id, msg_id, client_id, method="send"):
     rows, col = read_sheet_with_headers("Clients!A1:H200")
@@ -767,6 +802,7 @@ def _show_client(chat_id, msg_id, client_id, method="send"):
     else:
         send_msg(chat_id, text, markup)
 
+
 def _show_call_menu(chat_id, msg_id, lead_id, use_pipeline_edit=False):
     rows, col = read_sheet_with_headers("Leads!A1:T200")
     row  = next((r for r in rows if safe_get(r, col, "Lead_ID") == lead_id), None)
@@ -789,6 +825,7 @@ def _show_call_menu(chat_id, msg_id, lead_id, use_pipeline_edit=False):
         edit_pipeline_msg(chat_id, msg_id, text, markup)
     else:
         edit_msg(chat_id, msg_id, text, markup)
+
 
 def _confirm_call_out(chat_id, msg_id, lead_id, outcome, use_pipeline_edit=False):
     outcome_display = {
@@ -816,6 +853,7 @@ def _confirm_call_out(chat_id, msg_id, lead_id, outcome, use_pipeline_edit=False
         edit_pipeline_msg(chat_id, msg_id, text, markup)
     else:
         edit_msg(chat_id, msg_id, text, markup)
+
 
 def _confirm_contract(chat_id, msg_id, lead_id, use_pipeline=False):
     rows, col = read_sheet_with_headers("Leads!A1:T200")
@@ -853,6 +891,7 @@ def _confirm_contract(chat_id, msg_id, lead_id, use_pipeline=False):
         edit_pipeline_msg(chat_id, msg_id, text, markup)
     else:
         edit_msg(chat_id, msg_id, text, markup)
+
 
 def _execute_call_out(chat_id, msg_id, target_id, outcome, cb_id, use_pipeline=False):
     today_str = ph_now().strftime("%Y-%m-%d")
@@ -919,7 +958,6 @@ def _write_back(sheet_range_prefix, sheet_header_range, id_col, target_id, updat
 
 # ─────────────────────────────────────────────
 # SYSTEM 3C — DEPOSIT CONFIRMED HANDLER
-# No Zapier needed — runs directly in Railway
 # ─────────────────────────────────────────────
 def _handle_deposit_confirmed(lead_id, lead_name="—", project_id="—"):
     today_str = ph_now().strftime("%Y-%m-%d")
@@ -984,11 +1022,11 @@ def _handle_shoot_complete(lead_id, lead_name="—", project_id="—"):
         f"📅 Date: {today_str}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"✅ Shoot complete. Project → *Post-Production*\n"
-        f"When gallery is ready, tap below to deliver."
+        f"When gallery is ready, tap below to check."
     )
     buttons = [
         [{"text": "✅ Gallery Ready to Ship?", "callback_data": f"gallery_ready|{lead_id}"}],
-        [{"text": "🗂 View Project",             "callback_data": f"view_project|{lead_id}"}]
+        [{"text": "🗂 View Project",            "callback_data": f"view_project|{lead_id}"}]
     ]
     requests.post(f"{PIPELINE_API}/sendMessage", json={
         "chat_id":      CHAT_ID,
@@ -999,10 +1037,8 @@ def _handle_shoot_complete(lead_id, lead_name="—", project_id="—"):
 
 # ─────────────────────────────────────────────
 # SYSTEM 4 — GALLERY READY TO SHIP CHECK
-# Yes/No screen before deliver confirmation
 # ─────────────────────────────────────────────
 def _show_gallery_ready_check(chat_id, msg_id, lead_id, use_pipeline=False):
-    """Shows Yes/No — is the gallery ready to ship?"""
     proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
     proj_row = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == lead_id), None)
     if not proj_row:
@@ -1023,7 +1059,13 @@ def _show_gallery_ready_check(chat_id, msg_id, lead_id, use_pipeline=False):
     except Exception:
         pass
 
-    days_line = f"📅 {days_since} day(s) since the event." if days_since is not None else ""
+    if days_since is not None:
+        if days_since >= 0:
+            days_line = f"📅 {days_since} day(s) since the event."
+        else:
+            days_line = f"📅 Event is in {abs(days_since)} day(s) — hasn't happened yet."
+    else:
+        days_line = ""
 
     text = (
         f"📦 *Gallery Ready to Ship?*\n"
@@ -1031,27 +1073,19 @@ def _show_gallery_ready_check(chat_id, msg_id, lead_id, use_pipeline=False):
         f"👤 Client: *{client_name}*\n"
         f"🆔 Lead: `{lead_id}`\n"
         f"{days_line}\n\n"
-        f"Have you reviewed the edited photos and confirmed the gallery is ready to deliver to the client?"
+        f"Have you reviewed the edited photos and confirmed the gallery is ready to deliver?"
     )
     buttons = [
         [{"text": "✅ Yes — Ready to Deliver", "callback_data": f"gallery_ready_yes|{lead_id}"}],
         [{"text": "❌ No — Not Yet",           "callback_data": f"gallery_ready_no|{lead_id}"}]
     ]
     markup = {"inline_keyboard": buttons}
-    if msg_id:
-        if use_pipeline:
-            edit_pipeline_msg(chat_id, msg_id, text, markup)
-        else:
-            edit_msg(chat_id, msg_id, text, markup)
-    else:
-        send_pipeline_msg(chat_id, text, markup)
+    smart_send(chat_id, text, markup, msg_id=msg_id, use_pipeline=use_pipeline)
 
 # ─────────────────────────────────────────────
-# SYSTEM 4 — GALLERY DELIVERY CONFIRMATION
-# Shows a confirmation screen before firing
+# SYSTEM 4 — GALLERY DELIVERY CONFIRMATION SCREEN
 # ─────────────────────────────────────────────
 def _show_deliver_gallery_confirm(chat_id, msg_id, lead_id, use_pipeline=False):
-    """Step 1 of 2 — shows confirmation screen with client details before delivering."""
     proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
     proj_row = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == lead_id), None)
     if not proj_row:
@@ -1071,12 +1105,15 @@ def _show_deliver_gallery_confirm(chat_id, msg_id, lead_id, use_pipeline=False):
     due_date = (ph_now() + timedelta(days=14)).strftime("%Y-%m-%d")
 
     if gallery_url == "—" or not gallery_url:
-        send_pipeline_msg(chat_id,
+        smart_send(
+            chat_id,
             f"⚠️ *No Gallery URL Found*\n"
             f"Lead: `{lead_id}` | {client_name}\n\n"
             f"The Gallery_Folder_URL column is empty in the Projects sheet.\n"
             f"This should have been created automatically in System 3B.\n"
-            f"Check the sheet and fix the URL before delivering."
+            f"Fix the URL in the sheet before delivering.",
+            msg_id=msg_id,
+            use_pipeline=use_pipeline
         )
         return
 
@@ -1101,20 +1138,13 @@ def _show_deliver_gallery_confirm(chat_id, msg_id, lead_id, use_pipeline=False):
         [{"text": "❌ Cancel",                               "callback_data": f"view_project|{lead_id}"}]
     ]
     markup = {"inline_keyboard": buttons}
-    if msg_id:
-        if use_pipeline:
-            edit_pipeline_msg(chat_id, msg_id, text, markup)
-        else:
-            edit_msg(chat_id, msg_id, text, markup)
-    else:
-        send_pipeline_msg(chat_id, text, markup)
+    smart_send(chat_id, text, markup, msg_id=msg_id, use_pipeline=use_pipeline)
 
 # ─────────────────────────────────────────────
 # SYSTEM 4 — GALLERY DELIVERY EXECUTOR
-# Step 2 of 2 — fires after confirmation tap
+# FIX: Removed "Run Retention" + "View Pipeline" from success message — clean, one path forward
 # ─────────────────────────────────────────────
 def _execute_deliver_gallery(chat_id, msg_id, lead_id, cb_id, use_pipeline=False):
-    """Reads everything from the sheet and fires the Zapier webhook. No URL input needed."""
     proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
     proj_row = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == lead_id), None)
     if not proj_row:
@@ -1124,27 +1154,22 @@ def _execute_deliver_gallery(chat_id, msg_id, lead_id, cb_id, use_pipeline=False
     lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
     lead_row = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == lead_id), None)
 
-    pipe_rows, pipe_col = read_sheet_with_headers("Pipeline Tracker!A1:L200")
-    pipe_row = next((r for r in pipe_rows if safe_get(r, pipe_col, "Lead_ID") == lead_id), None)
-
     client_name  = safe_get(proj_row, proj_col, "Client_Name")
     project_id   = safe_get(proj_row, proj_col, "Project_ID")
     gallery_url  = safe_get(proj_row, proj_col, "Gallery_Folder_URL")
     balance      = safe_get(proj_row, proj_col, "Balance")
-    client_email = safe_get(lead_row, lead_col, "Email")       if lead_row else "—"
-    lead_name    = safe_get(lead_row, lead_col, "Full_Name")   if lead_row else "—"
+    client_email = safe_get(lead_row, lead_col, "Email")     if lead_row else "—"
+    lead_name    = safe_get(lead_row, lead_col, "Full_Name") if lead_row else "—"
 
     today_str    = ph_now().strftime("%Y-%m-%d")
     due_date_str = (ph_now() + timedelta(days=14)).strftime("%Y-%m-%d")
 
-    # Update Projects sheet
     _write_back("Projects", "Projects!A1:Z200", "Lead_ID", lead_id, {
         "Current_Stage":    "Delivered",
         "Delivery_Date":    today_str,
         "Balance_Due_Date": due_date_str
     })
 
-    # Update Pipeline Tracker
     _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", lead_id, {
         "Current_Stage":    "Delivered",
         "Last_Action":      "Gallery Delivered",
@@ -1152,7 +1177,6 @@ def _execute_deliver_gallery(chat_id, msg_id, lead_id, cb_id, use_pipeline=False
         "Next_Action_Date": today_str
     })
 
-    # Fire Zapier System 4 webhook
     fired = fire_webhook(DELIVER_GALLERY_WEBHOOK, {
         "lead_id":          lead_id,
         "lead_name":        lead_name,
@@ -1181,16 +1205,13 @@ def _execute_deliver_gallery(chat_id, msg_id, lead_id, cb_id, use_pipeline=False
             f"📊 Balance due: *${balance}* by {due_date_str}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"Pipeline → *Delivered*\n"
-            f"When ready, run the retention sequence."
+            f"Zapier will send a confirmation — then run retention."
         )
+        # FIX: Removed "Run Retention" + "View Pipeline" from here — they'll appear in /gallery_notify
         buttons = [
-            [{"text": "🗂 View Project",   "callback_data": f"view_project|{lead_id}"}],
-            [{"text": "📊 View Pipeline",  "callback_data": f"nav_pipe|none"}]
+            [{"text": "🗂 View Project", "callback_data": f"view_project|{lead_id}"}]
         ]
-        if use_pipeline:
-            edit_pipeline_msg(chat_id, msg_id, success_text, {"inline_keyboard": buttons})
-        else:
-            edit_msg(chat_id, msg_id, success_text, {"inline_keyboard": buttons})
+        smart_send(chat_id, success_text, {"inline_keyboard": buttons}, msg_id=msg_id, use_pipeline=use_pipeline)
     else:
         fail_text = (
             f"⚠️ *Webhook Failed — System 4 Did Not Fire*\n"
@@ -1198,16 +1219,12 @@ def _execute_deliver_gallery(chat_id, msg_id, lead_id, cb_id, use_pipeline=False
             f"Sheets have been updated but Zapier was not triggered.\n"
             f"Check DELIVER_GALLERY_WEBHOOK in Railway env vars and retry."
         )
-        if use_pipeline:
-            edit_pipeline_msg(chat_id, msg_id, fail_text)
-        else:
-            edit_msg(chat_id, msg_id, fail_text)
+        smart_send(chat_id, fail_text, msg_id=msg_id, use_pipeline=use_pipeline)
 
 # ─────────────────────────────────────────────
 # SYSTEM 5A — CLIENT STATS CALCULATOR
 # ─────────────────────────────────────────────
 def _update_client_stats(lead_id):
-    """Recalculates LTV, bookings, and tier for a client. Called before firing 5A webhook."""
     lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
     lead_row  = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == lead_id), None)
     if not lead_row:
@@ -1245,6 +1262,7 @@ def _update_client_stats(lead_id):
 
 # ─────────────────────────────────────────────
 # SHARED CALLBACK HANDLER
+# FIX: All nav_ callbacks now pass msg_id → edits in-place instead of sending new messages
 # ─────────────────────────────────────────────
 def handle_callbacks(data, use_pipeline=False):
     if "callback_query" not in data:
@@ -1274,26 +1292,27 @@ def handle_callbacks(data, use_pipeline=False):
     elif action == "view_client":
         _show_client(chat_id, msg_id, target_id, method="edit")
 
+    # FIX: All nav_ callbacks now pass msg_id so they edit in-place — no new message spam
     elif action == "nav_leads":
-        handle_leads_command(chat_id)
+        handle_leads_command(chat_id, msg_id=msg_id, use_pipeline=use_pipeline)
 
     elif action == "nav_hot":
-        handle_hot_command(chat_id)
+        handle_hot_command(chat_id, msg_id=msg_id, use_pipeline=use_pipeline)
 
     elif action == "nav_pipe":
         handle_pipeline_command(chat_id, msg_id=msg_id, use_pipeline=use_pipeline)
 
     elif action == "nav_projects":
-        handle_project_command(chat_id)
+        handle_project_command(chat_id, msg_id=msg_id, use_pipeline=use_pipeline)
 
     elif action == "nav_schedule":
         if target_id == "tomorrow":
-            handle_tomorrow_command(chat_id)
+            handle_tomorrow_command(chat_id, msg_id=msg_id, use_pipeline=use_pipeline)
         else:
-            handle_schedule_command(chat_id)
+            handle_schedule_command(chat_id, msg_id=msg_id, use_pipeline=use_pipeline)
 
     elif action == "nav_today":
-        handle_today_command(chat_id)
+        handle_today_command(chat_id, msg_id=msg_id, use_pipeline=use_pipeline)
 
     elif action == "upd_lead" and len(parts) > 2:
         new_status = parts[2]
@@ -1457,7 +1476,7 @@ def handle_callbacks(data, use_pipeline=False):
         else:
             edit_msg(chat_id, msg_id, prompt_text)
 
-    # ── SYSTEM 3C — Deposit Paid (no Zapier, runs directly) ──
+    # ── SYSTEM 3C — Deposit Paid ──
     elif action == "deposit_paid":
         pipe_rows, pipe_col = read_sheet_with_headers("Pipeline Tracker!A1:L200")
         pipe_row   = next((r for r in pipe_rows if safe_get(r, pipe_col, "Lead_ID") == target_id), None)
@@ -1491,12 +1510,12 @@ def handle_callbacks(data, use_pipeline=False):
         answer_callback(cb["id"], "Loading delivery details...", use_pipeline)
         _show_deliver_gallery_confirm(chat_id, msg_id, target_id, use_pipeline=use_pipeline)
 
-    # ── SYSTEM 4 — Gallery Ready: No → back to project with status note ──
+    # ── SYSTEM 4 — Gallery Ready: No → back to project ──
     elif action == "gallery_ready_no":
         answer_callback(cb["id"], "Got it — back to project.", use_pipeline)
         _show_project(chat_id, msg_id, target_id, method="edit", use_pipeline=use_pipeline)
 
-    # ── SYSTEM 4 — Deliver Gallery (Step 2: Execute after double confirm) ──
+    # ── SYSTEM 4 — Deliver Gallery (Execute after double confirm) ──
     elif action == "confirm_deliver":
         _execute_deliver_gallery(chat_id, msg_id, target_id, cb["id"], use_pipeline=use_pipeline)
 
@@ -1507,7 +1526,7 @@ def handle_callbacks(data, use_pipeline=False):
         proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
         proj_row = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == target_id), None)
         pipe_rows, pipe_col = read_sheet_with_headers("Pipeline Tracker!A1:L200")
-        pipe_row   = next((r for r in pipe_rows if safe_get(r, pipe_col, "Lead_ID") == target_id), None)
+        pipe_row     = next((r for r in pipe_rows if safe_get(r, pipe_col, "Lead_ID") == target_id), None)
         project_id   = safe_get(pipe_row, pipe_col, "Project_ID")  if pipe_row else "—"
         client_name  = safe_get(lead_row, lead_col, "Full_Name")   if lead_row else "—"
         client_email = safe_get(lead_row, lead_col, "Email")        if lead_row else "—"
@@ -1622,9 +1641,9 @@ def dashboard():
                 return jsonify({"status": "ok"})
             lead_id = parts[1]
             lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
-            lead_row   = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == lead_id), None)
+            lead_row     = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == lead_id), None)
             pipe_rows, pipe_col = read_sheet_with_headers("Pipeline Tracker!A1:L200")
-            pipe_row   = next((r for r in pipe_rows if safe_get(r, pipe_col, "Lead_ID") == lead_id), None)
+            pipe_row     = next((r for r in pipe_rows if safe_get(r, pipe_col, "Lead_ID") == lead_id), None)
             project_id   = safe_get(pipe_row, pipe_col, "Project_ID")  if pipe_row else "—"
             client_name  = safe_get(lead_row, lead_col, "Full_Name")   if lead_row else "—"
             client_email = safe_get(lead_row, lead_col, "Email")        if lead_row else "—"
@@ -1853,7 +1872,6 @@ def proposal_notify():
 
 # ─────────────────────────────────────────────
 # SYSTEM 3B — /invoice_sent
-# Called by Zapier after SignWell contract is signed
 # ─────────────────────────────────────────────
 @app.route("/invoice_sent", methods=["POST"])
 def invoice_sent():
@@ -1892,8 +1910,7 @@ def invoice_sent():
     return jsonify({"status": "ok"})
 
 # ─────────────────────────────────────────────
-# SYSTEM 3C — /deposit_confirmed
-# Fallback HTTP route (same logic as callback)
+# SYSTEM 3C — /deposit_confirmed (HTTP fallback)
 # ─────────────────────────────────────────────
 @app.route("/deposit_confirmed", methods=["POST"])
 def deposit_confirmed():
@@ -1906,7 +1923,7 @@ def deposit_confirmed():
 
 # ─────────────────────────────────────────────
 # SYSTEM 4 — /gallery_notify
-# Called by Zapier 4 after gallery email + balance invoice are sent
+# Called by Zapier 4 after all steps complete
 # ─────────────────────────────────────────────
 @app.route("/gallery_notify", methods=["POST"])
 def gallery_notify():
@@ -1918,21 +1935,22 @@ def gallery_notify():
     delivery_date = data.get("delivery_date", ph_now().strftime("%Y-%m-%d"))
 
     text = (
-        f"🖼️ *Gallery Delivered*\n"
+        f"✅ *System 4 Complete — Gallery Delivered*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 {lead_name}\n"
         f"🆔 Lead: `{lead_id}` | Project: `{project_id}`\n"
         f"📅 Delivered: {delivery_date}\n"
         f"📁 [View Gallery]({gallery_url})\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"✅ Gallery email sent to client.\n"
-        f"💳 Balance invoice sent via Zoho.\n"
-        f"When ready, run the retention sequence."
+        f"✅ All Zapier steps done.\n"
+        f"• Drive folder shared with client\n"
+        f"• Gallery email delivered\n"
+        f"• Balance invoice sent via Zoho\n\n"
+        f"Ready to run the retention sequence?"
     )
     buttons = [
         [{"text": "⭐ Run Retention",  "callback_data": f"trigger_retention|{lead_id}"}],
-        [{"text": "🗂 View Project",   "callback_data": f"view_project|{lead_id}"}],
-        [{"text": "📊 View Pipeline",  "callback_data": f"view_pipe|{lead_id}"}]
+        [{"text": "🗂 View Project",   "callback_data": f"view_project|{lead_id}"}]
     ]
     requests.post(f"{PIPELINE_API}/sendMessage", json={
         "chat_id":      CHAT_ID,
@@ -1944,7 +1962,6 @@ def gallery_notify():
 
 # ─────────────────────────────────────────────
 # SYSTEM 5A — /retention_notify
-# Called by Zapier 5A after review request email is sent
 # ─────────────────────────────────────────────
 @app.route("/retention_notify", methods=["POST"])
 def retention_notify():
@@ -1993,7 +2010,6 @@ def retention_notify():
 
 # ─────────────────────────────────────────────
 # SYSTEM 5B — /retention_5b_notify
-# Called by Zapier 5B after rebooking upsell email is sent (+7 days)
 # ─────────────────────────────────────────────
 @app.route("/retention_5b_notify", methods=["POST"])
 def retention_5b_notify():
