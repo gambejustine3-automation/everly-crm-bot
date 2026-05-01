@@ -686,15 +686,31 @@ def _show_project(chat_id, msg_id, lead_id, method="edit", use_pipeline=False):
         f"📦 Delivered: {safe_get(row, col, 'Delivery_Date')}\n"
         f"⭐ Review Sent: {safe_get(row, col, 'Review_Sent') if 'Review_Sent' in col else safe_get(row, col, 'Review')}"
     )
-    curr_idx    = PROJECT_STAGES.index(curr_stage) if curr_stage in PROJECT_STAGES else -1
-    next_stages = PROJECT_STAGES[curr_idx + 1: curr_idx + 3]
-    buttons     = [[{"text": f"➡️ {s}", "callback_data": f"upd_proj|{lead_id}|{s}"}] for s in next_stages]
+    # Calculate days since event and append status line for Post-Production
+    event_date_raw = safe_get(row, col, "Event_Date")
+    days_since_event = None
+    try:
+        for fmt in ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y", "%Y-%m-%d"):
+            try:
+                event_dt = datetime.strptime(event_date_raw.strip(), fmt)
+                days_since_event = (ph_now() - event_dt).days
+                break
+            except ValueError:
+                continue
+    except Exception:
+        pass
+
+    if curr_stage == "Post-Production" and days_since_event is not None:
+        text += f"\n\n⏳ *Still in post-production — {days_since_event} day(s) since the event.*"
+
+    buttons = []
     if curr_stage == "Active":
         buttons.append([{"text": "📸 Mark Shoot Complete", "callback_data": f"shoot_complete|{lead_id}"}])
     elif curr_stage == "Post-Production":
-        buttons.append([{"text": "🖼️ Deliver Gallery", "callback_data": f"deliver_gallery|{lead_id}"}])
+        buttons.append([{"text": "✅ Gallery Ready to Ship?", "callback_data": f"gallery_ready|{lead_id}"}])
     elif curr_stage == "Delivered":
-        buttons.append([{"text": "⭐ Run Retention", "callback_data": f"trigger_retention|{lead_id}"}])
+        buttons.append([{"text": "⭐ Run Retention",  "callback_data": f"trigger_retention|{lead_id}"}])
+        buttons.append([{"text": "➡️ Completed",      "callback_data": f"upd_proj|{lead_id}|Completed"}])
     buttons.append([
         {"text": "👤 View Lead", "callback_data": f"view_lead|{lead_id}"},
         {"text": "📊 Pipeline",  "callback_data": f"view_pipe|{lead_id}"}
@@ -965,8 +981,8 @@ def _handle_shoot_complete(lead_id, lead_name="—", project_id="—"):
         f"When gallery is ready, tap below to deliver."
     )
     buttons = [
-        [{"text": "🖼️ Deliver Gallery", "callback_data": f"deliver_gallery|{lead_id}"}],
-        [{"text": "🗂 View Project",    "callback_data": f"view_project|{lead_id}"}]
+        [{"text": "✅ Gallery Ready to Ship?", "callback_data": f"gallery_ready|{lead_id}"}],
+        [{"text": "🗂 View Project",             "callback_data": f"view_project|{lead_id}"}]
     ]
     requests.post(f"{PIPELINE_API}/sendMessage", json={
         "chat_id":      CHAT_ID,
@@ -974,6 +990,55 @@ def _handle_shoot_complete(lead_id, lead_name="—", project_id="—"):
         "parse_mode":   "Markdown",
         "reply_markup": {"inline_keyboard": buttons}
     })
+
+# ─────────────────────────────────────────────
+# SYSTEM 4 — GALLERY READY TO SHIP CHECK
+# Yes/No screen before deliver confirmation
+# ─────────────────────────────────────────────
+def _show_gallery_ready_check(chat_id, msg_id, lead_id, use_pipeline=False):
+    """Shows Yes/No — is the gallery ready to ship?"""
+    proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
+    proj_row = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == lead_id), None)
+    if not proj_row:
+        send_pipeline_msg(chat_id, f"❌ No project found for Lead `{lead_id}`.")
+        return
+
+    client_name    = safe_get(proj_row, proj_col, "Client_Name")
+    event_date_raw = safe_get(proj_row, proj_col, "Event_Date")
+    days_since     = None
+    try:
+        for fmt in ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y", "%Y-%m-%d"):
+            try:
+                event_dt   = datetime.strptime(event_date_raw.strip(), fmt)
+                days_since = (ph_now() - event_dt).days
+                break
+            except ValueError:
+                continue
+    except Exception:
+        pass
+
+    days_line = f"📅 {days_since} day(s) since the event." if days_since is not None else ""
+
+    text = (
+        f"📦 *Gallery Ready to Ship?*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 Client: *{client_name}*\n"
+        f"🆔 Lead: `{lead_id}`\n"
+        f"{days_line}\n\n"
+        f"Have you reviewed the edited photos and confirmed the gallery is ready to deliver to the client?"
+    )
+    buttons = [
+        [{"text": "✅ Yes — Ready to Deliver", "callback_data": f"gallery_ready_yes|{lead_id}"}],
+        [{"text": "❌ No — Not Yet",           "callback_data": f"gallery_ready_no|{lead_id}"}]
+    ]
+    markup = {"inline_keyboard": buttons}
+    if msg_id:
+        if use_pipeline:
+            edit_pipeline_msg(chat_id, msg_id, text, markup)
+        else:
+            edit_msg(chat_id, msg_id, text, markup)
+    else:
+        send_pipeline_msg(chat_id, text, markup)
 
 # ─────────────────────────────────────────────
 # SYSTEM 4 — GALLERY DELIVERY CONFIRMATION
@@ -1411,12 +1476,22 @@ def handle_callbacks(data, use_pipeline=False):
         answer_callback(cb["id"], "📸 Shoot marked complete", use_pipeline)
         _handle_shoot_complete(target_id, lead_name, project_id)
 
-    # ── SYSTEM 4 — Deliver Gallery (Step 1: Confirmation screen) ──
-    elif action == "deliver_gallery":
+    # ── SYSTEM 4 — Gallery Ready to Ship? (Yes/No check) ──
+    elif action == "gallery_ready":
+        answer_callback(cb["id"], "Checking project...", use_pipeline)
+        _show_gallery_ready_check(chat_id, msg_id, target_id, use_pipeline=use_pipeline)
+
+    # ── SYSTEM 4 — Gallery Ready: Yes → show delivery confirmation ──
+    elif action == "gallery_ready_yes":
         answer_callback(cb["id"], "Loading delivery details...", use_pipeline)
         _show_deliver_gallery_confirm(chat_id, msg_id, target_id, use_pipeline=use_pipeline)
 
-    # ── SYSTEM 4 — Deliver Gallery (Step 2: Execute after confirm tap) ──
+    # ── SYSTEM 4 — Gallery Ready: No → back to project with status note ──
+    elif action == "gallery_ready_no":
+        answer_callback(cb["id"], "Got it — back to project.", use_pipeline)
+        _show_project(chat_id, msg_id, target_id, method="edit", use_pipeline=use_pipeline)
+
+    # ── SYSTEM 4 — Deliver Gallery (Step 2: Execute after double confirm) ──
     elif action == "confirm_deliver":
         _execute_deliver_gallery(chat_id, msg_id, target_id, cb["id"], use_pipeline=use_pipeline)
 
