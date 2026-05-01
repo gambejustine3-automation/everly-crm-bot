@@ -515,7 +515,7 @@ def handle_search_command(chat_id, query):
     buttons.append([{"text": "⬅️ All Leads", "callback_data": "nav_leads|none"}])
     send_msg(chat_id, "\n".join(lines), {"inline_keyboard": buttons})
 
-def handle_pipeline_command(chat_id, use_pipeline=False):
+def handle_pipeline_command(chat_id, msg_id=None, use_pipeline=False):
     rows, col = read_sheet_with_headers("Pipeline Tracker!A1:L200")
     if not rows:
         return send_msg(chat_id, "📭 Pipeline is empty.")
@@ -532,10 +532,16 @@ def handle_pipeline_command(chat_id, use_pipeline=False):
         {"text": "📋 All Leads", "callback_data": "nav_leads|none"},
         {"text": "🗂 Projects",  "callback_data": "nav_projects|none"}
     ])
-    if use_pipeline:
-        send_pipeline_msg(chat_id, "\n".join(lines), {"inline_keyboard": buttons})
+    markup = {"inline_keyboard": buttons}
+    text   = "\n".join(lines)
+    if msg_id and use_pipeline:
+        edit_pipeline_msg(chat_id, msg_id, text, markup)
+    elif msg_id:
+        edit_msg(chat_id, msg_id, text, markup)
+    elif use_pipeline:
+        send_pipeline_msg(chat_id, text, markup)
     else:
-        send_msg(chat_id, "\n".join(lines), {"inline_keyboard": buttons})
+        send_msg(chat_id, text, markup)
 
 def handle_project_command(chat_id):
     rows, col = read_sheet_with_headers("Projects!A1:Z200")
@@ -627,24 +633,24 @@ def _show_pipeline(chat_id, msg_id, target_id, method="edit", use_pipeline=False
         f"📞 Call Status: {safe_get(row, col, 'Call_Status')}\n"
         f"📝 Proposal: {safe_get(row, col, 'Proposal_Status')}"
     )
-    curr_idx    = PIPELINE_STAGES.index(curr_stage) if curr_stage in PIPELINE_STAGES else -1
-    next_stages = PIPELINE_STAGES[curr_idx + 1: curr_idx + 4]
+    curr_idx    = PIPELINE_STAGES.index(curr_stage) if curr_stage in PIPELINE_STAGES else None
+    next_stages = PIPELINE_STAGES[curr_idx + 1: curr_idx + 4] if curr_idx is not None else []
     buttons     = [[{"text": f"➡️ {s}", "callback_data": f"upd_pipe|{target_id}|{s}"}] for s in next_stages]
     action_row = []
     if curr_stage == "Discovery Call Booked":
-        action_row = [{"text": "📞 Call Outcome",       "callback_data": f"call_menu|{target_id}"}]
+        action_row = [{"text": "📞 Call Outcome",           "callback_data": f"call_menu|{target_id}"}]
     elif curr_stage == "Discovery Call Completed":
-        action_row = [{"text": "📄 Send Proposal",      "callback_data": f"send_proposal|{target_id}"}]
+        action_row = [{"text": "📄 Send Proposal",          "callback_data": f"send_proposal|{target_id}"}]
     elif curr_stage == "Proposal Sent":
-        action_row = [{"text": "📝 Send Contract",      "callback_data": f"send_contract|{target_id}"}]
+        action_row = [{"text": "📝 Send Contract",          "callback_data": f"send_contract|{target_id}"}]
     elif curr_stage == "Contracted":
-        action_row = [{"text": "💰 Mark Deposit Paid",  "callback_data": f"deposit_paid|{target_id}"}]
+        action_row = [{"text": "💰 Mark Deposit Paid",      "callback_data": f"deposit_paid|{target_id}"}]
     elif curr_stage == "Active Project":
-        action_row = [{"text": "📸 Mark Shoot Complete","callback_data": f"shoot_complete|{target_id}"}]
+        action_row = [{"text": "📸 Mark Shoot Complete",    "callback_data": f"shoot_complete|{target_id}"}]
     elif curr_stage == "Post-Production":
-        action_row = [{"text": "🖼️ Deliver Gallery",   "callback_data": f"deliver_gallery|{target_id}"}]
+        action_row = [{"text": "✅ Gallery Ready to Ship?", "callback_data": f"gallery_ready|{target_id}"}]
     elif curr_stage == "Delivered":
-        action_row = [{"text": "⭐ Run Retention",      "callback_data": f"trigger_retention|{target_id}"}]
+        action_row = [{"text": "⭐ Run Retention",          "callback_data": f"trigger_retention|{target_id}"}]
     if action_row:
         buttons.append(action_row)
     buttons.append([
@@ -1178,9 +1184,8 @@ def _execute_deliver_gallery(chat_id, msg_id, lead_id, cb_id, use_pipeline=False
             f"When ready, run the retention sequence."
         )
         buttons = [
-            [{"text": "⭐ Run Retention",  "callback_data": f"trigger_retention|{lead_id}"}],
             [{"text": "🗂 View Project",   "callback_data": f"view_project|{lead_id}"}],
-            [{"text": "📊 View Pipeline",  "callback_data": f"view_pipe|{lead_id}"}]
+            [{"text": "📊 View Pipeline",  "callback_data": f"nav_pipe|none"}]
         ]
         if use_pipeline:
             edit_pipeline_msg(chat_id, msg_id, success_text, {"inline_keyboard": buttons})
@@ -1276,7 +1281,7 @@ def handle_callbacks(data, use_pipeline=False):
         handle_hot_command(chat_id)
 
     elif action == "nav_pipe":
-        handle_pipeline_command(chat_id, use_pipeline=use_pipeline)
+        handle_pipeline_command(chat_id, msg_id=msg_id, use_pipeline=use_pipeline)
 
     elif action == "nav_projects":
         handle_project_command(chat_id)
