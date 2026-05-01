@@ -351,14 +351,13 @@ def handle_help_command(chat_id):
         "`/project` — All active projects and their current stage\n\n"
         "🛠 *Admin*\n"
         "`/resetleadcounter` — Reset lead ID counter to 0 (use before demos)\n"
-        "`/deliver <Lead_ID> <drive_url>` — Trigger gallery delivery\n"
         "`/retention <Lead_ID>` — Trigger post-delivery review + retention sequence\n"
         "`/setbudget <Lead_ID> <amount>` — Confirm exact amount for $10k+/TBD leads before sending contract\n\n"
         "💡 *Tips*\n"
         "• Tap any lead or client button to drill in\n"
         "• Update lead status (HOT/WARM/COLD) from the lead card\n"
         "• Log call outcomes right after a discovery call\n"
-        "• Move pipeline stages with one tap"
+        "• Deliver galleries from the Projects tab — no typing needed"
     )
     send_msg(chat_id, text)
 
@@ -539,7 +538,7 @@ def handle_pipeline_command(chat_id, use_pipeline=False):
         send_msg(chat_id, "\n".join(lines), {"inline_keyboard": buttons})
 
 def handle_project_command(chat_id):
-    rows, col = read_sheet_with_headers("Projects!A1:W200")
+    rows, col = read_sheet_with_headers("Projects!A1:Z200")
     if not rows:
         return send_msg(chat_id, "📭 No projects found.")
     active = [r for r in rows if safe_get(r, col, "Current_Stage") not in ("Closed", "Completed")]
@@ -663,13 +662,15 @@ def _show_pipeline(chat_id, msg_id, target_id, method="edit", use_pipeline=False
         send_msg(chat_id, text, markup)
 
 def _show_project(chat_id, msg_id, lead_id, method="edit", use_pipeline=False):
-    rows, col = read_sheet_with_headers("Projects!A1:W200")
+    rows, col = read_sheet_with_headers("Projects!A1:Z200")
     row = next((r for r in rows if safe_get(r, col, "Lead_ID") == lead_id), None)
     if not row:
         return send_msg(chat_id, f"❌ No project found for Lead `{lead_id}`.")
-    curr_stage   = safe_get(row, col, "Current_Stage")
-    balance_val  = safe_get(row, col, "Balance")
-    deposit_paid = safe_get(row, col, "Deposit_Paid")
+    curr_stage      = safe_get(row, col, "Current_Stage")
+    balance_val     = safe_get(row, col, "Balance")
+    deposit_paid    = safe_get(row, col, "Deposit_Paid")
+    balance_due     = safe_get(row, col, "Balance_Due_Date")
+    balance_paid    = safe_get(row, col, "Balance_Paid")
     text = (
         f"🗂 *Project: {safe_get(row, col, 'Client_Name')}*\n"
         f"Project ID: `{safe_get(row, col, 'Project_ID')}`\n"
@@ -678,12 +679,12 @@ def _show_project(chat_id, msg_id, lead_id, method="edit", use_pipeline=False):
         f"📦 Package: {safe_get(row, col, 'Package')}\n"
         f"💰 Total: {safe_get(row, col, 'Total_Price')}\n"
         f"💵 Deposit: {safe_get(row, col, 'Deposit')} | Paid: {deposit_paid}\n"
-        f"📊 Balance: {balance_val}\n\n"
+        f"📊 Balance: {balance_val} | Due: {balance_due} | Paid: {balance_paid}\n\n"
         f"📍 Stage: *{curr_stage}*\n"
         f"📝 Contract: {safe_get(row, col, 'Contract_Sent')} ({safe_get(row, col, 'Contract_Date')})\n"
         f"🖼️ Gallery: {safe_get(row, col, 'Gallery_Folder_URL')}\n"
         f"📦 Delivered: {safe_get(row, col, 'Delivery_Date')}\n"
-        f"⭐ Review Sent: {safe_get(row, col, 'Review_Sent')}"
+        f"⭐ Review Sent: {safe_get(row, col, 'Review_Sent') if 'Review_Sent' in col else safe_get(row, col, 'Review')}"
     )
     curr_idx    = PROJECT_STAGES.index(curr_stage) if curr_stage in PROJECT_STAGES else -1
     next_stages = PROJECT_STAGES[curr_idx + 1: curr_idx + 3]
@@ -901,7 +902,7 @@ def _write_back(sheet_range_prefix, sheet_header_range, id_col, target_id, updat
 def _handle_deposit_confirmed(lead_id, lead_name="—", project_id="—"):
     today_str = ph_now().strftime("%Y-%m-%d")
 
-    _write_back("Projects", "Projects!A1:W200", "Lead_ID", lead_id, {
+    _write_back("Projects", "Projects!A1:Z200", "Lead_ID", lead_id, {
         "Deposit_Paid":  "TRUE",
         "Current_Stage": "Active"
     })
@@ -941,7 +942,7 @@ def _handle_deposit_confirmed(lead_id, lead_name="—", project_id="—"):
 def _handle_shoot_complete(lead_id, lead_name="—", project_id="—"):
     today_str = ph_now().strftime("%Y-%m-%d")
 
-    _write_back("Projects", "Projects!A1:W200", "Lead_ID", lead_id, {
+    _write_back("Projects", "Projects!A1:Z200", "Lead_ID", lead_id, {
         "Shoot_Complete":  "TRUE",
         "Current_Stage":   "Post-Production"
     })
@@ -975,6 +976,164 @@ def _handle_shoot_complete(lead_id, lead_name="—", project_id="—"):
     })
 
 # ─────────────────────────────────────────────
+# SYSTEM 4 — GALLERY DELIVERY CONFIRMATION
+# Shows a confirmation screen before firing
+# ─────────────────────────────────────────────
+def _show_deliver_gallery_confirm(chat_id, msg_id, lead_id, use_pipeline=False):
+    """Step 1 of 2 — shows confirmation screen with client details before delivering."""
+    proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
+    proj_row = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == lead_id), None)
+    if not proj_row:
+        send_pipeline_msg(chat_id, f"❌ No project found for Lead `{lead_id}`.")
+        return
+
+    client_name  = safe_get(proj_row, proj_col, "Client_Name")
+    project_id   = safe_get(proj_row, proj_col, "Project_ID")
+    gallery_url  = safe_get(proj_row, proj_col, "Gallery_Folder_URL")
+    balance      = safe_get(proj_row, proj_col, "Balance")
+    event_date   = safe_get(proj_row, proj_col, "Event_Date")
+
+    lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
+    lead_row     = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == lead_id), None)
+    client_email = safe_get(lead_row, lead_col, "Email") if lead_row else "—"
+
+    due_date = (ph_now() + timedelta(days=14)).strftime("%Y-%m-%d")
+
+    if gallery_url == "—" or not gallery_url:
+        send_pipeline_msg(chat_id,
+            f"⚠️ *No Gallery URL Found*\n"
+            f"Lead: `{lead_id}` | {client_name}\n\n"
+            f"The Gallery_Folder_URL column is empty in the Projects sheet.\n"
+            f"This should have been created automatically in System 3B.\n"
+            f"Check the sheet and fix the URL before delivering."
+        )
+        return
+
+    text = (
+        f"🖼️ *Confirm Gallery Delivery*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 Client: *{client_name}*\n"
+        f"🆔 Lead: `{lead_id}` | Project: `{project_id}`\n"
+        f"📅 Event: {event_date}\n"
+        f"✉️ Sending to: {client_email}\n\n"
+        f"📁 Gallery: {gallery_url}\n\n"
+        f"💳 *This will also:*\n"
+        f"  • Share the Drive folder with the client\n"
+        f"  • Send the gallery delivery email\n"
+        f"  • Create & send Zoho balance invoice\n"
+        f"  • Balance: *${balance}* | Due: {due_date}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"⚠️ This cannot be undone. Confirm?"
+    )
+    buttons = [
+        [{"text": "✅ Yes — Deliver Gallery & Send Invoice", "callback_data": f"confirm_deliver|{lead_id}"}],
+        [{"text": "❌ Cancel",                               "callback_data": f"view_project|{lead_id}"}]
+    ]
+    markup = {"inline_keyboard": buttons}
+    if msg_id:
+        if use_pipeline:
+            edit_pipeline_msg(chat_id, msg_id, text, markup)
+        else:
+            edit_msg(chat_id, msg_id, text, markup)
+    else:
+        send_pipeline_msg(chat_id, text, markup)
+
+# ─────────────────────────────────────────────
+# SYSTEM 4 — GALLERY DELIVERY EXECUTOR
+# Step 2 of 2 — fires after confirmation tap
+# ─────────────────────────────────────────────
+def _execute_deliver_gallery(chat_id, msg_id, lead_id, cb_id, use_pipeline=False):
+    """Reads everything from the sheet and fires the Zapier webhook. No URL input needed."""
+    proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
+    proj_row = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == lead_id), None)
+    if not proj_row:
+        answer_callback(cb_id, "❌ Project not found", use_pipeline)
+        return
+
+    lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
+    lead_row = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == lead_id), None)
+
+    pipe_rows, pipe_col = read_sheet_with_headers("Pipeline Tracker!A1:L200")
+    pipe_row = next((r for r in pipe_rows if safe_get(r, pipe_col, "Lead_ID") == lead_id), None)
+
+    client_name  = safe_get(proj_row, proj_col, "Client_Name")
+    project_id   = safe_get(proj_row, proj_col, "Project_ID")
+    gallery_url  = safe_get(proj_row, proj_col, "Gallery_Folder_URL")
+    balance      = safe_get(proj_row, proj_col, "Balance")
+    client_email = safe_get(lead_row, lead_col, "Email")       if lead_row else "—"
+    lead_name    = safe_get(lead_row, lead_col, "Full_Name")   if lead_row else "—"
+
+    today_str    = ph_now().strftime("%Y-%m-%d")
+    due_date_str = (ph_now() + timedelta(days=14)).strftime("%Y-%m-%d")
+
+    # Update Projects sheet
+    _write_back("Projects", "Projects!A1:Z200", "Lead_ID", lead_id, {
+        "Current_Stage":    "Delivered",
+        "Delivery_Date":    today_str,
+        "Balance_Due_Date": due_date_str
+    })
+
+    # Update Pipeline Tracker
+    _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", lead_id, {
+        "Current_Stage":    "Delivered",
+        "Last_Action":      "Gallery Delivered",
+        "Next_Action":      "Send Retention Email",
+        "Next_Action_Date": today_str
+    })
+
+    # Fire Zapier System 4 webhook
+    fired = fire_webhook(DELIVER_GALLERY_WEBHOOK, {
+        "lead_id":          lead_id,
+        "lead_name":        lead_name,
+        "project_id":       project_id,
+        "gallery_url":      gallery_url,
+        "client_name":      client_name,
+        "client_email":     client_email,
+        "balance":          balance,
+        "balance_due_date": due_date_str,
+        "delivery_date":    today_str
+    })
+
+    answer_callback(cb_id, "🖼️ Gallery delivery triggered!", use_pipeline)
+
+    if fired:
+        success_text = (
+            f"🖼️ *Gallery Delivered — System 4 Fired*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 {client_name}\n"
+            f"🆔 Lead: `{lead_id}` | Project: `{project_id}`\n"
+            f"📅 Delivered: {today_str}\n"
+            f"📁 [View Gallery]({gallery_url})\n\n"
+            f"✅ Drive folder shared with client.\n"
+            f"📧 Gallery delivery email queued.\n"
+            f"💳 Balance invoice sent via Zoho.\n"
+            f"📊 Balance due: *${balance}* by {due_date_str}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Pipeline → *Delivered*\n"
+            f"When ready, run the retention sequence."
+        )
+        buttons = [
+            [{"text": "⭐ Run Retention",  "callback_data": f"trigger_retention|{lead_id}"}],
+            [{"text": "🗂 View Project",   "callback_data": f"view_project|{lead_id}"}],
+            [{"text": "📊 View Pipeline",  "callback_data": f"view_pipe|{lead_id}"}]
+        ]
+        if use_pipeline:
+            edit_pipeline_msg(chat_id, msg_id, success_text, {"inline_keyboard": buttons})
+        else:
+            edit_msg(chat_id, msg_id, success_text, {"inline_keyboard": buttons})
+    else:
+        fail_text = (
+            f"⚠️ *Webhook Failed — System 4 Did Not Fire*\n"
+            f"Lead: `{lead_id}`\n\n"
+            f"Sheets have been updated but Zapier was not triggered.\n"
+            f"Check DELIVER_GALLERY_WEBHOOK in Railway env vars and retry."
+        )
+        if use_pipeline:
+            edit_pipeline_msg(chat_id, msg_id, fail_text)
+        else:
+            edit_msg(chat_id, msg_id, fail_text)
+
+# ─────────────────────────────────────────────
 # SYSTEM 5A — CLIENT STATS CALCULATOR
 # ─────────────────────────────────────────────
 def _update_client_stats(lead_id):
@@ -985,7 +1144,7 @@ def _update_client_stats(lead_id):
         return None
     client_id = safe_get(lead_row, lead_col, "Client_ID")
 
-    proj_rows, proj_col = read_sheet_with_headers("Projects!A1:W200")
+    proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
     client_projects = [r for r in proj_rows if safe_get(r, proj_col, "Client_ID") == client_id]
 
     total_ltv = 0
@@ -1084,7 +1243,7 @@ def handle_callbacks(data, use_pipeline=False):
 
     elif action == "upd_proj" and len(parts) > 2:
         new_stage = parts[2]
-        _write_back("Projects", "Projects!A1:W200", "Lead_ID", target_id,
+        _write_back("Projects", "Projects!A1:Z200", "Lead_ID", target_id,
                     {"Current_Stage": new_stage})
         answer_callback(cb["id"], f"✅ Project stage → {new_stage}", use_pipeline)
         _show_project(chat_id, msg_id, target_id, use_pipeline=use_pipeline)
@@ -1252,20 +1411,20 @@ def handle_callbacks(data, use_pipeline=False):
         answer_callback(cb["id"], "📸 Shoot marked complete", use_pipeline)
         _handle_shoot_complete(target_id, lead_name, project_id)
 
-    # ── SYSTEM 4 — Deliver Gallery ──
+    # ── SYSTEM 4 — Deliver Gallery (Step 1: Confirmation screen) ──
     elif action == "deliver_gallery":
-        send_pipeline_msg(chat_id,
-            f"📁 *Deliver Gallery — `{target_id}`*\n\n"
-            f"Send the Drive folder URL using:\n"
-            f"`/deliver {target_id} <google_drive_folder_url>`\n\n"
-            f"Example:\n`/deliver {target_id} https://drive.google.com/drive/folders/...`"
-        )
+        answer_callback(cb["id"], "Loading delivery details...", use_pipeline)
+        _show_deliver_gallery_confirm(chat_id, msg_id, target_id, use_pipeline=use_pipeline)
+
+    # ── SYSTEM 4 — Deliver Gallery (Step 2: Execute after confirm tap) ──
+    elif action == "confirm_deliver":
+        _execute_deliver_gallery(chat_id, msg_id, target_id, cb["id"], use_pipeline=use_pipeline)
 
     # ── SYSTEM 5A — Trigger Retention ──
     elif action == "trigger_retention":
         lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
         lead_row = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == target_id), None)
-        proj_rows, proj_col = read_sheet_with_headers("Projects!A1:W200")
+        proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
         proj_row = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == target_id), None)
         pipe_rows, pipe_col = read_sheet_with_headers("Pipeline Tracker!A1:L200")
         pipe_row   = next((r for r in pipe_rows if safe_get(r, pipe_col, "Lead_ID") == target_id), None)
@@ -1376,46 +1535,6 @@ def dashboard():
         elif text == "/resetleadcounter":
             write_sheet("Config!A2", [[0]])
             send_msg(chat_id, "✅ Lead counter reset to 0. Next lead will be LED-0001.")
-        elif text.startswith("/deliver"):
-            parts = text.split(maxsplit=2)
-            if len(parts) != 3:
-                send_msg(chat_id, "Usage: /deliver <Lead_ID> <google_drive_folder_url>")
-                return jsonify({"status": "ok"})
-            lead_id, gallery_url = parts[1], parts[2]
-            lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
-            lead_row     = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == lead_id), None)
-            client_name  = safe_get(lead_row, lead_col, "Full_Name") if lead_row else "—"
-            client_email = safe_get(lead_row, lead_col, "Email")      if lead_row else "—"
-
-            # Update Projects sheet immediately before Zapier runs
-            today_str = ph_now().strftime("%Y-%m-%d")
-            _write_back("Projects", "Projects!A1:W200", "Lead_ID", lead_id, {
-                "Current_Stage": "Delivered",
-                "Delivery_Date": today_str
-            })
-            _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", lead_id, {
-                "Current_Stage":    "Delivered",
-                "Last_Action":      "Gallery Delivered",
-                "Next_Action":      "Send Retention Email",
-                "Next_Action_Date": today_str
-            })
-
-            fired = fire_webhook(DELIVER_GALLERY_WEBHOOK, {
-                "lead_id":      lead_id,
-                "gallery_url":  gallery_url,
-                "client_name":  client_name,
-                "client_email": client_email
-            })
-            if fired:
-                send_msg(chat_id,
-                    f"🖼️ *Gallery Delivery Triggered*\n"
-                    f"Lead: `{lead_id}` | {client_name}\n"
-                    f"📁 {gallery_url}\n\n"
-                    f"✅ Sheets updated. Client email + balance invoice queued via Zapier.\n"
-                    f"Pipeline → *Delivered*"
-                )
-            else:
-                send_msg(chat_id, "⚠️ Webhook failed — check DELIVER_GALLERY_WEBHOOK in Railway.")
         elif text.startswith("/retention"):
             parts = text.split()
             if len(parts) != 2:
@@ -1760,9 +1879,8 @@ def retention_notify():
 
     tier_emoji = {"VIP": "⭐", "Premium": "💎", "Standard": "🔹"}.get(new_tier, "👤")
 
-    # Update Projects → Completed + Review_Sent flag
     today_str = ph_now().strftime("%Y-%m-%d")
-    _write_back("Projects", "Projects!A1:W200", "Lead_ID", lead_id, {
+    _write_back("Projects", "Projects!A1:Z200", "Lead_ID", lead_id, {
         "Current_Stage":    "Completed",
         "Review_Sent":      "TRUE",
         "Review_Sent_Date": today_str
@@ -1807,7 +1925,7 @@ def retention_5b_notify():
 
     today_str = ph_now().strftime("%Y-%m-%d")
 
-    _write_back("Projects", "Projects!A1:W200", "Lead_ID", lead_id, {
+    _write_back("Projects", "Projects!A1:Z200", "Lead_ID", lead_id, {
         "Upsell_Sent": "TRUE"
     })
 
