@@ -546,7 +546,7 @@ def _auto_complete_project(lead_id, client_name):
 
     # Notify Dashboard Bot (morning briefing context)
     send_msg(CHAT_ID, msg)
-    # Also notify Pipeline Bot so the pipeline feed is complete  [FIX #3]
+    # Also notify Pipeline Bot so the pipeline feed is complete
     send_pipeline_msg(CHAT_ID, msg)
 
     print(f"[AUTO-COMPLETE] {lead_id} — {client_name}")
@@ -1208,7 +1208,12 @@ def _write_back(sheet_range_prefix, sheet_header_range, id_col, target_id, updat
     return False
 
 # ─────────────────────────────────────────────
-# SYSTEM 3C — DEPOSIT CONFIRMED
+# SYSTEM 3C — DEPOSIT CONFIRMED  [FIX B applied]
+#
+# CHANGES FROM ORIGINAL:
+#   • CTA button changed from "🗂 View Project" → "📸 Mark Shoot Complete"
+#   • "View Project" was a UX dead end — the owner needs a direct action,
+#     not a navigation button, after deposit is confirmed.
 # ─────────────────────────────────────────────
 def _handle_deposit_confirmed(lead_id, lead_name="—", project_id="—"):
     today_str = ph_now().strftime("%Y-%m-%d")
@@ -1217,8 +1222,10 @@ def _handle_deposit_confirmed(lead_id, lead_name="—", project_id="—"):
         "Deposit_Paid": "TRUE", "Current_Stage": "Active"
     })
     _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", lead_id, {
-        "Current_Stage": "Active Project", "Last_Action": "Deposit Received",
-        "Next_Action": "Prepare for Shoot", "Next_Action_Date": today_str
+        "Current_Stage":    "Active Project",
+        "Last_Action":      "Deposit Received",
+        "Next_Action":      "Prepare for Shoot",
+        "Next_Action_Date": today_str
     })
 
     text = (
@@ -1229,14 +1236,19 @@ def _handle_deposit_confirmed(lead_id, lead_name="—", project_id="—"):
         f"📅 Paid: {today_str}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"✅ Deposit marked as paid.\n"
-        f"📊 Pipeline → *Active Project*\n"
-        f"➡️ Next step: prepare for the shoot.\n\n"
-        f"Tap below when you're ready to mark the shoot done."
+        f"📊 Pipeline → *Active Project*\n\n"
+        f"Tap below when the shoot is done."
     )
-    buttons = [[{"text": "🗂 View Project", "callback_data": f"view_project|{lead_id}"}]]
+
+    # FIX B: Correct CTA — "Mark Shoot Complete" not "View Project"
+    # "View Project" is a dead end per UX Rule #2.
+    buttons = [[{"text": "📸 Mark Shoot Complete", "callback_data": f"shoot_complete|{lead_id}"}]]
+
     requests.post(f"{PIPELINE_API}/sendMessage", json={
-        "chat_id": CHAT_ID, "text": text,
-        "parse_mode": "Markdown", "reply_markup": {"inline_keyboard": buttons}
+        "chat_id":      CHAT_ID,
+        "text":         text,
+        "parse_mode":   "Markdown",
+        "reply_markup": {"inline_keyboard": buttons}
     })
 
 # ─────────────────────────────────────────────
@@ -1433,7 +1445,7 @@ def _execute_deliver_gallery(chat_id, msg_id, lead_id, cb_id, use_pipeline=False
         smart_send(chat_id, fail_text, msg_id=msg_id, use_pipeline=use_pipeline)
 
 # ─────────────────────────────────────────────
-# SYSTEM 5A — CLIENT STATS  [FIX #2: unchanged, kept as helper]
+# SYSTEM 5A — CLIENT STATS
 # ─────────────────────────────────────────────
 def _update_client_stats(lead_id):
     lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
@@ -1470,7 +1482,7 @@ def _update_client_stats(lead_id):
 
 
 # ─────────────────────────────────────────────
-# SYSTEM 5A — SHARED EXECUTION HELPER  [FIX #2: NEW]
+# SYSTEM 5A — SHARED EXECUTION HELPER
 # Single source of truth for retention trigger logic.
 # Called by both the trigger_retention callback and /retention command.
 # ─────────────────────────────────────────────
@@ -1719,6 +1731,10 @@ def handle_callbacks(data, use_pipeline=False):
         else:
             edit_msg(chat_id, msg_id, prompt_text)
 
+    # ── FIX A: deposit_paid callback ──
+    # Collapses the original "Deposit Invoice Sent" card before
+    # sending the new Deposit Confirmed notification.
+    # Without this, the card keeps showing "Mark Deposit Paid" forever.
     elif action == "deposit_paid":
         pipe_rows, pipe_col = read_sheet_with_headers("Pipeline Tracker!A1:L200")
         pipe_row   = next((r for r in pipe_rows if safe_get(r, pipe_col, "Lead_ID") == target_id), None)
@@ -1726,9 +1742,26 @@ def handle_callbacks(data, use_pipeline=False):
         lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
         lead_row   = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == target_id), None)
         lead_name  = safe_get(lead_row, lead_col, "Full_Name") if lead_row else "—"
-        answer_callback(cb["id"], "💰 Deposit confirmed", use_pipeline)
+
+        answer_callback(cb["id"], "💰 Deposit confirmed!", use_pipeline)
+
+        # FIX A: Collapse the original "Deposit Invoice Sent" card and strip its button.
+        # Omitting reply_markup tells Telegram to remove the inline keyboard.
+        edit_pipeline_msg(
+            chat_id, msg_id,
+            f"💳 *Deposit Invoice Sent*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 {lead_name} | Lead: `{target_id}`\n\n"
+            f"✅ Deposit received and logged on {ph_now().strftime('%Y-%m-%d')}."
+        )
+
+        # Now send the new Deposit Confirmed notification (with correct CTA per FIX B)
         _handle_deposit_confirmed(target_id, lead_name, project_id)
 
+    # ── FIX C: shoot_complete callback ──
+    # Collapses the "Deposit Confirmed" card before sending the
+    # new Shoot Complete notification.
+    # Without this, that card keeps showing "Mark Shoot Complete" after being tapped.
     elif action == "shoot_complete":
         pipe_rows, pipe_col = read_sheet_with_headers("Pipeline Tracker!A1:L200")
         pipe_row   = next((r for r in pipe_rows if safe_get(r, pipe_col, "Lead_ID") == target_id), None)
@@ -1736,7 +1769,20 @@ def handle_callbacks(data, use_pipeline=False):
         lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
         lead_row   = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == target_id), None)
         lead_name  = safe_get(lead_row, lead_col, "Full_Name") if lead_row else "—"
-        answer_callback(cb["id"], "📸 Shoot marked complete", use_pipeline)
+
+        answer_callback(cb["id"], "📸 Shoot marked complete!", use_pipeline)
+
+        # FIX C: Collapse the "Deposit Confirmed" card and strip the "Mark Shoot Complete" button.
+        # Omitting reply_markup tells Telegram to remove the inline keyboard.
+        edit_pipeline_msg(
+            chat_id, msg_id,
+            f"💰 *Deposit Confirmed*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 {lead_name} | Lead: `{target_id}`\n\n"
+            f"✅ Shoot complete — {ph_now().strftime('%Y-%m-%d')}."
+        )
+
+        # Now send the new Shoot Complete notification
         _handle_shoot_complete(target_id, lead_name, project_id)
 
     elif action == "gallery_ready":
@@ -1838,7 +1884,7 @@ def handle_callbacks(data, use_pipeline=False):
         ]
         smart_send(chat_id, text, {"inline_keyboard": buttons}, msg_id=msg_id, use_pipeline=use_pipeline)
 
-    # ── Retention execute — now calls shared helper  [FIX #2] ──
+    # ── Retention execute — calls shared helper ──
     elif action == "trigger_retention":
         result = _execute_retention(target_id)
         answer_callback(cb["id"], "⭐ Retention triggered", use_pipeline)
@@ -2009,7 +2055,6 @@ def dashboard():
             write_sheet("Config!A2", [[0]])
             send_msg(chat_id, "✅ Lead counter reset to 0. Next lead will be LED-0001.")
         elif text.startswith("/retention"):
-            # ── Refactored: now calls _execute_retention()  [FIX #2] ──
             parts = text.split()
             if len(parts) != 2:
                 send_msg(chat_id, "Usage: `/retention <Lead_ID>`")
