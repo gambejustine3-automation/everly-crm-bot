@@ -214,7 +214,6 @@ def smart_send(chat_id, text, markup=None, msg_id=None, use_pipeline=False):
 
 # ─────────────────────────────────────────────
 # CONFIG HELPERS — Briefing Time
-# Reads/writes from Config sheet (Key | Value columns)
 # ─────────────────────────────────────────────
 def get_briefing_time():
     try:
@@ -285,7 +284,6 @@ def init_scheduler():
 
 # ─────────────────────────────────────────────
 # DAILY BRIEFING
-# Sends a smart morning summary to the Dashboard bot
 # ─────────────────────────────────────────────
 def send_daily_briefing():
     today      = ph_now()
@@ -477,7 +475,6 @@ def send_daily_briefing():
 
 # ─────────────────────────────────────────────
 # AUTO-COMPLETE RETENTION
-# Runs daily — completes projects where retention window (7 days) has passed
 # ─────────────────────────────────────────────
 def check_retention_completions():
     today     = ph_now()
@@ -938,7 +935,7 @@ def _show_pipeline(chat_id, msg_id, target_id, method="edit", use_pipeline=False
     elif curr_stage == "Post-Production":
         action_row = [{"text": "✅ Gallery Ready to Ship?", "callback_data": f"gallery_ready|{target_id}"}]
     elif curr_stage == "Delivered":
-        action_row = [{"text": "✅ Mark Balance Paid",          "callback_data": f"balance_paid|{target_id}"}]
+        action_row = [{"text": "✅ Mark Balance Paid",      "callback_data": f"balance_paid|{target_id}"}]
 
     if action_row:
         buttons.append(action_row)
@@ -1214,7 +1211,6 @@ def _handle_deposit_confirmed(lead_id, lead_name="—", project_id="—"):
         f"➡️ Next step: prepare for the shoot.\n\n"
         f"Tap below when you're ready to mark the shoot done."
     )
-    # One CTA only — clear next step
     buttons = [[{"text": "🗂 View Project", "callback_data": f"view_project|{lead_id}"}]]
     requests.post(f"{PIPELINE_API}/sendMessage", json={
         "chat_id": CHAT_ID, "text": text,
@@ -1245,7 +1241,6 @@ def _handle_shoot_complete(lead_id, lead_name="—", project_id="—"):
         f"✅ Shoot done. Now in *Post-Production*.\n"
         f"When gallery is ready, tap below."
     )
-    # One CTA only
     buttons = [[{"text": "✅ Gallery Ready to Ship?", "callback_data": f"gallery_ready|{lead_id}"}]]
     requests.post(f"{PIPELINE_API}/sendMessage", json={
         "chat_id": CHAT_ID, "text": text,
@@ -1404,7 +1399,6 @@ def _execute_deliver_gallery(chat_id, msg_id, lead_id, cb_id, use_pipeline=False
             f"Pipeline → *Delivered*\n"
             f"Zapier will confirm — then you can run retention."
         )
-        # One CTA — balance must be confirmed before retention
         buttons = [[{"text": "✅ Mark Balance Paid", "callback_data": f"balance_paid|{lead_id}"}]]
         smart_send(chat_id, success_text, {"inline_keyboard": buttons}, msg_id=msg_id, use_pipeline=use_pipeline)
     else:
@@ -1781,18 +1775,83 @@ def handle_callbacks(data, use_pipeline=False):
         })
 
         answer_callback(cb["id"], "⭐ Retention triggered", use_pipeline)
-        msg_text = (
-            f"⭐ *Retention Sequence Triggered*\n"
+
+        # ── NEW: Show rebooking override option after retention fires ──
+        if fired:
+            msg_text = (
+                f"⭐ *Retention Sequence Triggered*\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 {client_name} | Lead: `{target_id}`\n\n"
+                f"✅ Review request email queued.\n"
+                f"📧 Rebooking upsell auto-fires in +7 days via Zapier.\n"
+                f"💰 Client LTV: ${new_ltv} | Tier: {new_tier}\n\n"
+                f"Project auto-completes in 7 days whether or not a review comes in.\n\n"
+                f"Need to send the rebooking email now instead of waiting?"
+            )
+            ret_buttons = [[{"text": "📧 Send Rebooking Now", "callback_data": f"send_rebooking_now|{target_id}"}]]
+            smart_send(chat_id, msg_text, {"inline_keyboard": ret_buttons}, msg_id=msg_id, use_pipeline=use_pipeline)
+        else:
+            smart_send(chat_id, "⚠️ Webhook failed — check RETENTION_WEBHOOK in Railway.", msg_id=msg_id, use_pipeline=use_pipeline)
+
+    # ── Send Rebooking Now — confirmation screen ──
+    elif action == "send_rebooking_now":
+        proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
+        proj_row    = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == target_id), None)
+        client_name = safe_get(proj_row, proj_col, "Client_Name") if proj_row else "—"
+        lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
+        lead_row     = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == target_id), None)
+        client_email = safe_get(lead_row, lead_col, "Email") if lead_row else "—"
+        text = (
+            f"📧 *Confirm Send Rebooking Email*\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"👤 {client_name} | Lead: `{target_id}`\n\n"
-            f"✅ Review request email queued.\n"
-            f"📧 Rebooking upsell scheduled for +7 days.\n"
-            f"💰 Client LTV: ${new_ltv} | Tier: {new_tier}\n\n"
-            f"Project will auto-complete in 7 days whether or not a review comes in."
-        ) if fired else (
-            f"⚠️ Webhook failed — check RETENTION_WEBHOOK in Railway."
+            f"👤 {client_name} | Lead: `{target_id}`\n"
+            f"✉️ Sending to: {client_email}\n\n"
+            f"⚠️ This sends the rebooking upsell email *right now*, skipping the 7-day Zapier delay.\n\n"
+            f"The automatic Zapier sequence will still fire in 7 days unless you cancel it manually in Zapier.\n\n"
+            f"Confirm?"
         )
-        smart_send(chat_id, msg_text, msg_id=msg_id, use_pipeline=use_pipeline)
+        buttons = [
+            [
+                {"text": "✅ Yes — Send Now", "callback_data": f"send_rebooking_confirm|{target_id}"},
+                {"text": "❌ Cancel",          "callback_data": f"view_project|{target_id}"}
+            ]
+        ]
+        smart_send(chat_id, text, {"inline_keyboard": buttons}, msg_id=msg_id, use_pipeline=use_pipeline)
+
+    # ── Send Rebooking Now — execute direct webhook ──
+    elif action == "send_rebooking_confirm":
+        proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
+        proj_row    = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == target_id), None)
+        client_name = safe_get(proj_row, proj_col, "Client_Name") if proj_row else "—"
+        project_id  = safe_get(proj_row, proj_col, "Project_ID")  if proj_row else "—"
+        lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
+        lead_row     = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == target_id), None)
+        client_email = safe_get(lead_row, lead_col, "Email")      if lead_row else "—"
+        event_type   = safe_get(lead_row, lead_col, "Event_Type") if lead_row else "—"
+
+        fired = fire_webhook(RETENTION_5B_WEBHOOK, {
+            "lead_id":      target_id,
+            "project_id":   project_id,
+            "client_name":  client_name,
+            "client_email": client_email,
+            "event_type":   event_type
+        })
+
+        answer_callback(cb["id"], "📧 Rebooking email triggered!", use_pipeline)
+
+        if fired:
+            text = (
+                f"📧 *Rebooking Email Sent — Manual Override*\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 {client_name} | Lead: `{target_id}`\n"
+                f"✉️ Sent to: {client_email}\n\n"
+                f"✅ Rebooking upsell delivered immediately.\n"
+                f"⚠️ Remember to cancel the Zapier +7-day delay if you don't want a duplicate email."
+            )
+        else:
+            text = f"⚠️ Webhook failed — check RETENTION_5B_WEBHOOK in Railway."
+
+        smart_send(chat_id, text, msg_id=msg_id, use_pipeline=use_pipeline)
 
     return jsonify({"status": "ok"})
 
@@ -2076,7 +2135,6 @@ def proposal_notify():
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"When the client confirms, tap below to send the contract."
     )
-    # One CTA — no View Pipeline button here
     buttons = [[{"text": "📝 Send Contract", "callback_data": f"confirm_contract|{lead_id}"}]]
     requests.post(f"{PIPELINE_API}/sendMessage", json={
         "chat_id": CHAT_ID, "text": text,
@@ -2107,7 +2165,6 @@ def invoice_sent():
         f"✅ Contract signed. Zoho invoice sent.\n"
         f"Tap below when payment is confirmed in Zoho."
     )
-    # One CTA only — no View Pipeline / View Project
     buttons = [[{"text": "💰 Mark Deposit Paid", "callback_data": f"deposit_paid|{lead_id}"}]]
     requests.post(f"{PIPELINE_API}/sendMessage", json={
         "chat_id": CHAT_ID, "text": text,
@@ -2147,7 +2204,6 @@ def gallery_notify():
         f"• Balance invoice sent via Zoho\n\n"
         f"Tap below when you confirm payment received in Zoho."
     )
-    # One CTA only — retention comes after balance is confirmed
     buttons = [[{"text": "✅ Mark Balance Paid", "callback_data": f"balance_paid|{lead_id}"}]]
     requests.post(f"{PIPELINE_API}/sendMessage", json={
         "chat_id": CHAT_ID, "text": text,
