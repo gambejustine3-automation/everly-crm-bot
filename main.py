@@ -1904,7 +1904,7 @@ def retention_notify():
         f"✅ Review request email sent to client.\n"
         f"📧 Rebooking upsell auto-fires via Zapier in +7 days.\n"
         f"🔄 Project auto-completes in 7 days if no manual action.\n\n"
-
+    )
 
     # Edit the existing message using smart_send
     smart_send(CHAT_ID, text, msg_id=message_id, use_pipeline=True)
