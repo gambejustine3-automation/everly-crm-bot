@@ -35,7 +35,7 @@ CONTRACT_ZAPIER_WEBHOOK  = os.environ.get("CONTRACT_ZAPIER_WEBHOOK")
 DEPOSIT_PAID_WEBHOOK     = os.environ.get("DEPOSIT_PAID_WEBHOOK")
 DELIVER_GALLERY_WEBHOOK  = os.environ.get("DELIVER_GALLERY_WEBHOOK")
 RETENTION_WEBHOOK        = os.environ.get("RETENTION_WEBHOOK")
-RETENTION_5B_WEBHOOK     = os.environ.get("RETENTION_5B_WEBHOOK")
+
 
 # External Resources
 GOOGLE_REVIEW_LINK       = os.environ.get("GOOGLE_REVIEW_LINK", "https://g.page/r/YOUR_PLACE_ID/review")
@@ -989,8 +989,7 @@ def _show_project(chat_id, msg_id, lead_id, use_pipeline=False):
 
     if current_stage == "Delivered" and (not review_sent or review_sent.upper() != "TRUE"):
         buttons.append([{"text": "⭐ Run Retention", "callback_data": f"trigger_retention_confirm|{lead_id}"}])
-    elif current_stage == "Delivered" and review_sent.upper() == "TRUE" and (not upsell_sent or upsell_sent.upper() != "TRUE"):
-        buttons.append([{"text": "📧 Send Rebooking Now", "callback_data": f"send_rebooking_now|{lead_id}"}])
+
 
     smart_send(chat_id, text, {"inline_keyboard": buttons}, msg_id, use_pipeline)
 
@@ -1136,7 +1135,7 @@ def _execute_retention(lead_id):
         "Next_Action_Date": today_str
     })
 
-    # Fire Zapier webhook (System 5A trigger) with message_id
+    # Fire Zapier webhook (Everly & Co. — System 5 Review + Rebooking Sequence trigger) with message_id
     fired = fire_webhook(RETENTION_WEBHOOK, {
         "lead_id":      lead_id,
         "message_id":   message_id, # New parameter to pass to Zapier
@@ -1470,65 +1469,7 @@ def handle_callbacks(data, use_pipeline=False):
         if not result["fired"]:
             smart_send(chat_id, "⚠️ Webhook failed — check RETENTION_WEBHOOK in Railway.", msg_id=msg_id, use_pipeline=use_pipeline)
 
-    # ── Send Rebooking Now — confirmation screen ──
-    elif action == "send_rebooking_now":
-        proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
-        proj_row    = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == target_id), None)
-        client_name = safe_get(proj_row, proj_col, "Client_Name") if proj_row else "—"
-        lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
-        lead_row     = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == target_id), None)
-        client_email = safe_get(lead_row, lead_col, "Email") if lead_row else "—"
-        text = (
-            f"📧 *Confirm Send Rebooking Email*\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"👤 {client_name} | Lead: `{target_id}`\n"
-            f"✉️ Sending to: {client_email}\n\n"
-            f"⚠️ This sends the rebooking upsell email *right now*, skipping the 7-day Zapier delay.\n\n"
-            f"The automatic Zapier sequence will still fire in 7 days unless you cancel it manually in Zapier.\n\n"
-            f"Confirm?"
-        )
-        buttons = [
-            [
-                {"text": "✅ Yes — Send Now", "callback_data": f"send_rebooking_confirm|{target_id}"},
-                {"text": "❌ Cancel",          "callback_data": f"view_project|{target_id}"}
-            ]
-        ]
-        smart_send(chat_id, text, {"inline_keyboard": buttons}, msg_id=msg_id, use_pipeline=use_pipeline)
 
-    # ── Send Rebooking Now — execute direct webhook ──
-    elif action == "send_rebooking_confirm":
-        proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
-        proj_row    = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == target_id), None)
-        client_name = safe_get(proj_row, proj_col, "Client_Name") if proj_row else "—"
-        project_id  = safe_get(proj_row, proj_col, "Project_ID")  if proj_row else "—"
-        lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
-        lead_row     = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == target_id), None)
-        client_email = safe_get(lead_row, lead_col, "Email")      if lead_row else "—"
-        event_type   = safe_get(lead_row, lead_col, "Event_Type") if lead_row else "—"
-
-        fired = fire_webhook(RETENTION_5B_WEBHOOK, {
-            "lead_id":      target_id,
-            "project_id":   project_id,
-            "client_name":  client_name,
-            "client_email": client_email,
-            "event_type":   event_type
-        })
-
-        answer_callback(cb["id"], "📧 Rebooking email triggered!", use_pipeline)
-
-        if fired:
-            text = (
-                f"📧 *Rebooking Email Sent — Manual Override*\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"👤 {client_name} | Lead: `{target_id}`\n"
-                f"✉️ Sent to: {client_email}\n\n"
-                f"✅ Rebooking upsell delivered immediately.\n"
-                f"⚠️ Remember to cancel the Zapier +7-day delay if you don't want a duplicate email."
-            )
-        else:
-            text = f"⚠️ Webhook failed — check RETENTION_5B_WEBHOOK in Railway."
-
-        smart_send(chat_id, text, msg_id=msg_id, use_pipeline=use_pipeline)
 
     return jsonify({"status": "ok"})
 
@@ -1913,7 +1854,7 @@ def gallery_delivered():
     return jsonify({"status": "ok"})
 
 # ─────────────────────────────────────────────
-# ZAPIER NOTIFY ROUTES — SYSTEM 5A  [FIX #1]
+# ZAPIER NOTIFY ROUTES — Everly & Co. — System 5 Review + Rebooking Sequence (Review Request)
 #
 # CRITICAL: Does NOT set Current_Stage = "Completed".
 # Projects must stay "Delivered" so APScheduler can find the row
@@ -1951,7 +1892,7 @@ def retention_notify():
     })
 
     text = (
-        f"⭐ *System 5A Complete — Review Request Sent*\n"
+        f"⭐ *Everly & Co. — System 5 Review + Rebooking Sequence (Review Request) Complete*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 {client_name} | {tier_emoji} {new_tier}\n"
         f"🆔 Lead: `{lead_id}` | Project: `{project_id}`\n"
@@ -1963,21 +1904,19 @@ def retention_notify():
         f"✅ Review request email sent to client.\n"
         f"📧 Rebooking upsell auto-fires via Zapier in +7 days.\n"
         f"🔄 Project auto-completes in 7 days if no manual action.\n\n"
-        f"Need to send the rebooking email now instead of waiting?"
-    )
-    ret_buttons = [[{"text": "📧 Send Rebooking Now", "callback_data": f"send_rebooking_now|{lead_id}"}]]
+
 
     # Edit the existing message using smart_send
-    smart_send(CHAT_ID, text, {"inline_keyboard": ret_buttons}, msg_id=message_id, use_pipeline=True)
+    smart_send(CHAT_ID, text, msg_id=message_id, use_pipeline=True)
 
     return jsonify({"status": "ok"})
 
 
 # ─────────────────────────────────────────────
-# ZAPIER NOTIFY ROUTES — SYSTEM 5B
+# ZAPIER NOTIFY ROUTES — Everly & Co. — System 5 Review + Rebooking Sequence (Rebooking Upsell)
 # ─────────────────────────────────────────────
-@app.route("/retention_5b_notify", methods=["POST"])
-def retention_5b_notify():
+@app.route("/retention_rebooking_notify", methods=["POST"])
+def retention_rebooking_notify():
     data        = request.json
     lead_id     = data.get("lead_id",     "—")
     client_name = data.get("client_name", "—")
@@ -1998,7 +1937,7 @@ def retention_5b_notify():
     })
 
     text = (
-        f"📧 *System 5B Complete — Rebooking Email Sent*\n"
+        f"📧 *Everly & Co. — Rebooking Sequence Complete — Rebooking Email Sent*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 {client_name}\n"
         f"🆔 Lead: `{lead_id}` | Project: `{project_id}`\n"
