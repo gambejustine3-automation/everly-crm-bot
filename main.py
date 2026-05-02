@@ -474,22 +474,33 @@ def send_daily_briefing():
     send_msg(CHAT_ID, "\n".join(lines), markup)
 
 # ─────────────────────────────────────────────
-# AUTO-COMPLETE RETENTION
+# AUTO-COMPLETE RETENTION  [FIX #1 + #3]
+# This is the ONLY place that sets Projects → "Completed".
+# /retention_notify must NOT set "Completed" or this function
+# will never find the row (it checks for stage == "Delivered").
+# Also now notifies Pipeline Bot in addition to Dashboard Bot.
 # ─────────────────────────────────────────────
 def check_retention_completions():
+    """
+    Runs daily at scheduled time (PH).
+    Finds Projects in "Delivered" stage where Review_Sent_Date >= 7 days ago.
+    Only works correctly if /retention_notify does NOT set Current_Stage = "Completed".
+    """
     today     = ph_now()
     proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
 
     for r in proj_rows:
+        # Must still be "Delivered" — already "Completed"/"Closed" → skip
         stage = safe_get(r, proj_col, "Current_Stage")
         if stage not in ("Delivered",):
             continue
 
+        # Review_Sent_Date is written by /retention_notify when Zapier 5A completes
         review_sent_date_str = safe_get(r, proj_col, "Review_Sent_Date")
         if review_sent_date_str == "—":
             continue
 
-        lead_id = safe_get(r, proj_col, "Lead_ID")
+        lead_id     = safe_get(r, proj_col, "Lead_ID")
         client_name = safe_get(r, proj_col, "Client_Name")
 
         try:
@@ -505,7 +516,13 @@ def check_retention_completions():
         except Exception as e:
             print(f"[RETENTION CHECK] Error for {lead_id}: {e}")
 
+
 def _auto_complete_project(lead_id, client_name):
+    """
+    Called by APScheduler after 7-day retention window.
+    Sets Projects → Completed and Pipeline → Closed Won.
+    Notifies both Dashboard Bot and Pipeline Bot.
+    """
     today_str = ph_now().strftime("%Y-%m-%d")
 
     _write_back("Projects", "Projects!A1:Z200", "Lead_ID", lead_id, {
@@ -518,15 +535,21 @@ def _auto_complete_project(lead_id, client_name):
         "Next_Action_Date": today_str
     })
 
-    send_msg(CHAT_ID,
+    msg = (
         f"✅ *Project Auto-Completed*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 {client_name} | Lead: `{lead_id}`\n"
         f"📅 {today_str}\n\n"
         f"Retention window closed (7 days).\n"
-        f"Project marked as *Completed* — Pipeline → *Closed Won*."
+        f"Project → *Completed* | Pipeline → *Closed Won*"
     )
-    print(f"[AUTO-COMPLETE] {lead_id} — {client_name} auto-completed")
+
+    # Notify Dashboard Bot (morning briefing context)
+    send_msg(CHAT_ID, msg)
+    # Also notify Pipeline Bot so the pipeline feed is complete  [FIX #3]
+    send_pipeline_msg(CHAT_ID, msg)
+
+    print(f"[AUTO-COMPLETE] {lead_id} — {client_name}")
 
 # ─────────────────────────────────────────────
 # CAL.COM API HELPERS
@@ -919,7 +942,6 @@ def _show_pipeline(chat_id, msg_id, target_id, method="edit", use_pipeline=False
         f"📝 Proposal: {safe_get(row, col, 'Proposal_Status')}"
     )
 
-    # ── Contextual action button only — no confusing stage jumps ──
     buttons = []
     action_row = []
     if curr_stage == "Discovery Call Booked":
@@ -1411,7 +1433,7 @@ def _execute_deliver_gallery(chat_id, msg_id, lead_id, cb_id, use_pipeline=False
         smart_send(chat_id, fail_text, msg_id=msg_id, use_pipeline=use_pipeline)
 
 # ─────────────────────────────────────────────
-# SYSTEM 5A — CLIENT STATS
+# SYSTEM 5A — CLIENT STATS  [FIX #2: unchanged, kept as helper]
 # ─────────────────────────────────────────────
 def _update_client_stats(lead_id):
     lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
@@ -1427,16 +1449,88 @@ def _update_client_stats(lead_id):
     bookings  = len(client_projects)
     for p in client_projects:
         try:
-            total_ltv += float(str(safe_get(p, proj_col, "Total_Price")).replace(",", "").replace("$", "") or 0)
+            total_ltv += float(
+                str(safe_get(p, proj_col, "Total_Price"))
+                .replace(",", "").replace("$", "") or 0
+            )
         except ValueError:
             pass
 
-    tier = "VIP" if (bookings >= 3 or total_ltv >= 50000) else "Premium" if (bookings >= 2 or total_ltv >= 20000) else "Standard"
+    if bookings >= 3 or total_ltv >= 50000:
+        tier = "VIP"
+    elif bookings >= 2 or total_ltv >= 20000:
+        tier = "Premium"
+    else:
+        tier = "Standard"
 
     _write_back("Clients", "Clients!A1:H200", "Client_ID", client_id, {
         "LTV": str(int(total_ltv)), "Bookings": str(bookings), "Client_Tier": tier
     })
     return {"ltv": int(total_ltv), "bookings": bookings, "tier": tier}
+
+
+# ─────────────────────────────────────────────
+# SYSTEM 5A — SHARED EXECUTION HELPER  [FIX #2: NEW]
+# Single source of truth for retention trigger logic.
+# Called by both the trigger_retention callback and /retention command.
+# ─────────────────────────────────────────────
+def _execute_retention(lead_id):
+    """
+    Core retention trigger. Call from:
+      - trigger_retention callback (button tap)
+      - /retention text command
+    Returns dict: fired, client_name, client_email, project_id, new_ltv, new_tier, bookings
+    """
+    lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
+    lead_row  = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == lead_id), None)
+
+    proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
+    proj_row  = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == lead_id), None)
+
+    pipe_rows, pipe_col = read_sheet_with_headers("Pipeline Tracker!A1:L200")
+    pipe_row  = next((r for r in pipe_rows if safe_get(r, pipe_col, "Lead_ID") == lead_id), None)
+
+    project_id   = safe_get(pipe_row, pipe_col, "Project_ID")  if pipe_row  else "—"
+    client_name  = safe_get(lead_row, lead_col, "Full_Name")   if lead_row  else "—"
+    client_email = safe_get(lead_row, lead_col, "Email")        if lead_row  else "—"
+    event_type   = safe_get(lead_row, lead_col, "Event_Type")   if lead_row  else "—"
+
+    stats    = _update_client_stats(lead_id)
+    new_ltv  = stats["ltv"]      if stats else 0
+    new_tier = stats["tier"]     if stats else "Standard"
+    bookings = stats["bookings"] if stats else 1
+
+    today_str = ph_now().strftime("%Y-%m-%d")
+
+    # Pipeline Tracker → Retention stage
+    _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", lead_id, {
+        "Current_Stage":    "Retention",
+        "Last_Action":      "Review Request Sent",
+        "Next_Action":      "Await Review — Rebooking in 7 days",
+        "Next_Action_Date": today_str
+    })
+
+    # Fire Zapier webhook (System 5A trigger)
+    fired = fire_webhook(RETENTION_WEBHOOK, {
+        "lead_id":      lead_id,
+        "project_id":   project_id,
+        "client_name":  client_name,
+        "client_email": client_email,
+        "event_type":   event_type,
+        "new_ltv":      new_ltv,
+        "new_tier":     new_tier,
+        "bookings":     bookings
+    })
+
+    return {
+        "fired":        fired,
+        "client_name":  client_name,
+        "client_email": client_email,
+        "project_id":   project_id,
+        "new_ltv":      new_ltv,
+        "new_tier":     new_tier,
+        "bookings":     bookings
+    }
 
 # ─────────────────────────────────────────────
 # SHARED CALLBACK HANDLER
@@ -1744,47 +1838,19 @@ def handle_callbacks(data, use_pipeline=False):
         ]
         smart_send(chat_id, text, {"inline_keyboard": buttons}, msg_id=msg_id, use_pipeline=use_pipeline)
 
+    # ── Retention execute — now calls shared helper  [FIX #2] ──
     elif action == "trigger_retention":
-        lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
-        lead_row = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == target_id), None)
-        proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
-        proj_row = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == target_id), None)
-        pipe_rows, pipe_col = read_sheet_with_headers("Pipeline Tracker!A1:L200")
-        pipe_row     = next((r for r in pipe_rows if safe_get(r, pipe_col, "Lead_ID") == target_id), None)
-        project_id   = safe_get(pipe_row, pipe_col, "Project_ID")  if pipe_row else "—"
-        client_name  = safe_get(lead_row, lead_col, "Full_Name")   if lead_row else "—"
-        client_email = safe_get(lead_row, lead_col, "Email")        if lead_row else "—"
-        event_type   = safe_get(lead_row, lead_col, "Event_Type")   if lead_row else "—"
-
-        stats    = _update_client_stats(target_id)
-        new_ltv  = stats["ltv"]      if stats else "—"
-        new_tier = stats["tier"]     if stats else "—"
-        bookings = stats["bookings"] if stats else "—"
-
-        today_str = ph_now().strftime("%Y-%m-%d")
-        _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", target_id, {
-            "Current_Stage": "Retention", "Last_Action": "Gallery Delivered",
-            "Next_Action": "Await Review", "Next_Action_Date": today_str
-        })
-
-        fired = fire_webhook(RETENTION_WEBHOOK, {
-            "lead_id": target_id, "project_id": project_id,
-            "client_name": client_name, "client_email": client_email,
-            "event_type": event_type, "new_ltv": new_ltv,
-            "new_tier": new_tier, "bookings": bookings
-        })
-
+        result = _execute_retention(target_id)
         answer_callback(cb["id"], "⭐ Retention triggered", use_pipeline)
 
-        # ── NEW: Show rebooking override option after retention fires ──
-        if fired:
+        if result["fired"]:
             msg_text = (
                 f"⭐ *Retention Sequence Triggered*\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"👤 {client_name} | Lead: `{target_id}`\n\n"
-                f"✅ Review request email queued.\n"
-                f"📧 Rebooking upsell auto-fires in +7 days via Zapier.\n"
-                f"💰 Client LTV: ${new_ltv} | Tier: {new_tier}\n\n"
+                f"👤 {result['client_name']} | Lead: `{target_id}`\n\n"
+                f"✅ Review request email queued via Zapier.\n"
+                f"📧 Rebooking upsell auto-fires in +7 days.\n"
+                f"💰 LTV: ${result['new_ltv']} | Tier: {result['new_tier']}\n\n"
                 f"Project auto-completes in 7 days whether or not a review comes in.\n\n"
                 f"Need to send the rebooking email now instead of waiting?"
             )
@@ -1943,43 +2009,23 @@ def dashboard():
             write_sheet("Config!A2", [[0]])
             send_msg(chat_id, "✅ Lead counter reset to 0. Next lead will be LED-0001.")
         elif text.startswith("/retention"):
+            # ── Refactored: now calls _execute_retention()  [FIX #2] ──
             parts = text.split()
             if len(parts) != 2:
                 send_msg(chat_id, "Usage: `/retention <Lead_ID>`")
                 return jsonify({"status": "ok"})
             lead_id = parts[1]
-            lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
-            lead_row     = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == lead_id), None)
-            pipe_rows, pipe_col = read_sheet_with_headers("Pipeline Tracker!A1:L200")
-            pipe_row     = next((r for r in pipe_rows if safe_get(r, pipe_col, "Lead_ID") == lead_id), None)
-            project_id   = safe_get(pipe_row, pipe_col, "Project_ID")  if pipe_row else "—"
-            client_name  = safe_get(lead_row, lead_col, "Full_Name")   if lead_row else "—"
-            client_email = safe_get(lead_row, lead_col, "Email")        if lead_row else "—"
-            event_type   = safe_get(lead_row, lead_col, "Event_Type")   if lead_row else "—"
-            stats    = _update_client_stats(lead_id)
-            new_ltv  = stats["ltv"]      if stats else "—"
-            new_tier = stats["tier"]     if stats else "—"
-            bookings = stats["bookings"] if stats else "—"
-            today_str = ph_now().strftime("%Y-%m-%d")
-            _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", lead_id, {
-                "Current_Stage": "Retention", "Last_Action": "Gallery Delivered",
-                "Next_Action": "Await Review", "Next_Action_Date": today_str
-            })
-            fired = fire_webhook(RETENTION_WEBHOOK, {
-                "lead_id": lead_id, "project_id": project_id,
-                "client_name": client_name, "client_email": client_email,
-                "event_type": event_type, "new_ltv": new_ltv,
-                "new_tier": new_tier, "bookings": bookings
-            })
-            if fired:
+            result  = _execute_retention(lead_id)
+            if result["fired"]:
                 send_msg(chat_id,
                     f"⭐ *Retention triggered for `{lead_id}`*\n"
-                    f"Review request queued. Rebooking in +7 days.\n"
-                    f"LTV: ${new_ltv} | Tier: {new_tier}\n\n"
+                    f"Review request queued via Zapier.\n"
+                    f"Rebooking in +7 days.\n"
+                    f"LTV: ${result['new_ltv']} | Tier: {result['new_tier']}\n\n"
                     f"Project auto-completes in 7 days."
                 )
             else:
-                send_msg(chat_id, "⚠️ Webhook failed — check RETENTION_WEBHOOK.")
+                send_msg(chat_id, "⚠️ Webhook failed — check RETENTION_WEBHOOK in Railway.")
         elif text.startswith("/setbudget"):
             parts = text.split(maxsplit=2)
             if len(parts) != 3:
@@ -2211,6 +2257,14 @@ def gallery_notify():
     })
     return jsonify({"status": "ok"})
 
+
+# ─────────────────────────────────────────────
+# ZAPIER NOTIFY ROUTES — SYSTEM 5A  [FIX #1]
+#
+# CRITICAL: Does NOT set Current_Stage = "Completed".
+# Projects must stay "Delivered" so APScheduler can find the row
+# after 7 days and auto-complete via check_retention_completions().
+# ─────────────────────────────────────────────
 @app.route("/retention_notify", methods=["POST"])
 def retention_notify():
     data        = request.json
@@ -2222,15 +2276,27 @@ def retention_notify():
     new_tier    = data.get("new_tier",    "—")
     bookings    = data.get("bookings",    "—")
 
-    tier_emoji = {"VIP": "⭐", "Premium": "💎", "Standard": "🔹"}.get(new_tier, "👤")
+    tier_emoji = {"VIP": "⭐", "Premium": "💎", "Standard": "🔹"}.get(str(new_tier), "👤")
     today_str  = ph_now().strftime("%Y-%m-%d")
 
+    # ── Write review flags only — DO NOT set Current_Stage = "Completed" ──
+    # Projects must stay "Delivered" so APScheduler check_retention_completions()
+    # can find this row and auto-complete it after the 7-day window.
     _write_back("Projects", "Projects!A1:Z200", "Lead_ID", lead_id, {
-        "Current_Stage": "Completed", "Review_Sent": "TRUE", "Review_Sent_Date": today_str
+        "Review_Sent":      "TRUE",
+        "Review_Sent_Date": today_str
+    })
+
+    # Pipeline: confirm in-flight Retention stage, update action notes
+    # Current_Stage is already "Retention" (set by trigger_retention callback)
+    _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", lead_id, {
+        "Last_Action":      "Review Request Email Sent",
+        "Next_Action":      "Await 7-day Window — Rebooking Email Queued",
+        "Next_Action_Date": today_str
     })
 
     text = (
-        f"⭐ *Retention Sequence Triggered*\n"
+        f"⭐ *System 5A Complete — Review Request Sent*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 {client_name} | {tier_emoji} {new_tier}\n"
         f"🆔 Lead: `{lead_id}` | Project: `{project_id}`\n"
@@ -2239,15 +2305,21 @@ def retention_notify():
         f"  💰 Lifetime Value: ${new_ltv}\n"
         f"  📅 Total Bookings: {bookings}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"✅ Review request sent.\n"
-        f"📧 Rebooking email queued for +7 days.\n"
-        f"🔄 Project will auto-complete in 7 days."
+        f"✅ Review request email sent to client.\n"
+        f"📧 Rebooking upsell auto-fires via Zapier in +7 days.\n"
+        f"🔄 Project auto-completes in 7 days if no manual action."
     )
     requests.post(f"{PIPELINE_API}/sendMessage", json={
-        "chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"
+        "chat_id": CHAT_ID,
+        "text": text,
+        "parse_mode": "Markdown"
     })
     return jsonify({"status": "ok"})
 
+
+# ─────────────────────────────────────────────
+# ZAPIER NOTIFY ROUTES — SYSTEM 5B
+# ─────────────────────────────────────────────
 @app.route("/retention_5b_notify", methods=["POST"])
 def retention_5b_notify():
     data        = request.json
@@ -2258,24 +2330,31 @@ def retention_5b_notify():
 
     today_str = ph_now().strftime("%Y-%m-%d")
 
-    _write_back("Projects", "Projects!A1:Z200", "Lead_ID", lead_id, {"Upsell_Sent": "TRUE"})
+    _write_back("Projects", "Projects!A1:Z200", "Lead_ID", lead_id, {
+        "Upsell_Sent": "TRUE"
+    })
+    # Pipeline → Closed Won (parallel to APScheduler — both are safe/idempotent)
     _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", lead_id, {
-        "Current_Stage": "Closed Won", "Last_Action": "Rebooking Email Sent",
-        "Next_Action": "Monitor for Rebook", "Next_Action_Date": today_str
+        "Current_Stage":    "Closed Won",
+        "Last_Action":      "Rebooking Email Sent",
+        "Next_Action":      "Monitor for Rebook",
+        "Next_Action_Date": today_str
     })
 
     text = (
-        f"📧 *Rebooking Email Sent — System 5B*\n"
+        f"📧 *System 5B Complete — Rebooking Email Sent*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 {client_name}\n"
         f"🆔 Lead: `{lead_id}` | Project: `{project_id}`\n"
         f"📸 Event: {event_type}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"✅ Rebooking upsell email delivered.\n"
+        f"✅ Rebooking upsell email delivered to client.\n"
         f"📊 Pipeline → *Closed Won*"
     )
     requests.post(f"{PIPELINE_API}/sendMessage", json={
-        "chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"
+        "chat_id": CHAT_ID,
+        "text": text,
+        "parse_mode": "Markdown"
     })
     return jsonify({"status": "ok"})
 
