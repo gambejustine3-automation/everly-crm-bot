@@ -938,7 +938,7 @@ def _show_pipeline(chat_id, msg_id, target_id, method="edit", use_pipeline=False
     elif curr_stage == "Post-Production":
         action_row = [{"text": "✅ Gallery Ready to Ship?", "callback_data": f"gallery_ready|{target_id}"}]
     elif curr_stage == "Delivered":
-        action_row = [{"text": "⭐ Run Retention",          "callback_data": f"trigger_retention|{target_id}"}]
+        action_row = [{"text": "✅ Mark Balance Paid",          "callback_data": f"balance_paid|{target_id}"}]
 
     if action_row:
         buttons.append(action_row)
@@ -1000,7 +1000,7 @@ def _show_project(chat_id, msg_id, lead_id, method="edit", use_pipeline=False):
     elif curr_stage == "Post-Production":
         buttons.append([{"text": "✅ Gallery Ready to Ship?", "callback_data": f"gallery_ready|{lead_id}"}])
     elif curr_stage == "Delivered":
-        buttons.append([{"text": "⭐ Run Retention",          "callback_data": f"trigger_retention|{lead_id}"}])
+        buttons.append([{"text": "✅ Mark Balance Paid",       "callback_data": f"balance_paid|{lead_id}"}])
 
     buttons.append([
         {"text": "👤 View Lead", "callback_data": f"view_lead|{lead_id}"},
@@ -1404,8 +1404,8 @@ def _execute_deliver_gallery(chat_id, msg_id, lead_id, cb_id, use_pipeline=False
             f"Pipeline → *Delivered*\n"
             f"Zapier will confirm — then you can run retention."
         )
-        # One CTA — next logical step
-        buttons = [[{"text": "⭐ Run Retention", "callback_data": f"trigger_retention|{lead_id}"}]]
+        # One CTA — balance must be confirmed before retention
+        buttons = [[{"text": "✅ Mark Balance Paid", "callback_data": f"balance_paid|{lead_id}"}]]
         smart_send(chat_id, success_text, {"inline_keyboard": buttons}, msg_id=msg_id, use_pipeline=use_pipeline)
     else:
         fail_text = (
@@ -1665,6 +1665,90 @@ def handle_callbacks(data, use_pipeline=False):
 
     elif action == "confirm_deliver":
         _execute_deliver_gallery(chat_id, msg_id, target_id, cb["id"], use_pipeline=use_pipeline)
+
+    # ── Balance Paid — confirmation screen ──
+    elif action == "balance_paid":
+        proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
+        proj_row    = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == target_id), None)
+        client_name = safe_get(proj_row, proj_col, "Client_Name")    if proj_row else "—"
+        balance     = safe_get(proj_row, proj_col, "Balance")         if proj_row else "—"
+        due_date    = safe_get(proj_row, proj_col, "Balance_Due_Date") if proj_row else "—"
+        text = (
+            f"💳 *Confirm Balance Paid*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 {client_name} | Lead: `{target_id}`\n\n"
+            f"💰 Amount: *${balance}*\n"
+            f"📅 Due: {due_date}\n\n"
+            f"⚠️ Confirm you have received the full balance payment in Zoho?"
+        )
+        buttons = [
+            [
+                {"text": "✅ Yes — Mark Paid", "callback_data": f"balance_paid_confirm|{target_id}"},
+                {"text": "❌ Cancel",           "callback_data": f"view_project|{target_id}"}
+            ]
+        ]
+        smart_send(chat_id, text, {"inline_keyboard": buttons}, msg_id=msg_id, use_pipeline=use_pipeline)
+
+    # ── Balance Paid — execute write + show retention CTA ──
+    elif action == "balance_paid_confirm":
+        today_str   = ph_now().strftime("%Y-%m-%d")
+        proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
+        proj_row    = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == target_id), None)
+        client_name = safe_get(proj_row, proj_col, "Client_Name") if proj_row else "—"
+        project_id  = safe_get(proj_row, proj_col, "Project_ID")  if proj_row else "—"
+        balance     = safe_get(proj_row, proj_col, "Balance")      if proj_row else "—"
+
+        _write_back("Projects", "Projects!A1:Z200", "Lead_ID", target_id, {
+            "Balance_Paid": "TRUE"
+        })
+        _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", target_id, {
+            "Last_Action":      "Balance Received",
+            "Next_Action":      "Run Retention Sequence",
+            "Next_Action_Date": today_str
+        })
+
+        answer_callback(cb["id"], "💰 Balance marked as paid!", use_pipeline)
+
+        text = (
+            f"💰 *Balance Confirmed Paid*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 {client_name}\n"
+            f"🆔 Lead: `{target_id}` | Project: `{project_id}`\n"
+            f"💵 Amount: ${balance}\n"
+            f"📅 Received: {today_str}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"✅ Balance marked as paid in the system.\n"
+            f"Ready to send the retention sequence to the client?"
+        )
+        buttons = [[{"text": "⭐ Run Retention", "callback_data": f"trigger_retention_confirm|{target_id}"}]]
+        smart_send(chat_id, text, {"inline_keyboard": buttons}, msg_id=msg_id, use_pipeline=use_pipeline)
+
+    # ── Retention — confirmation screen before firing ──
+    elif action == "trigger_retention_confirm":
+        proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
+        proj_row    = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == target_id), None)
+        client_name = safe_get(proj_row, proj_col, "Client_Name") if proj_row else "—"
+        lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
+        lead_row     = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == target_id), None)
+        client_email = safe_get(lead_row, lead_col, "Email") if lead_row else "—"
+        text = (
+            f"⭐ *Confirm Retention Sequence*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 {client_name} | Lead: `{target_id}`\n"
+            f"✉️ Sending to: {client_email}\n\n"
+            f"This will:\n"
+            f"• Send a review request email to the client\n"
+            f"• Schedule a rebooking email for +7 days\n"
+            f"• Update client LTV and tier\n\n"
+            f"⚠️ Confirm?"
+        )
+        buttons = [
+            [
+                {"text": "✅ Yes — Send It", "callback_data": f"trigger_retention|{target_id}"},
+                {"text": "❌ Cancel",         "callback_data": f"view_project|{target_id}"}
+            ]
+        ]
+        smart_send(chat_id, text, {"inline_keyboard": buttons}, msg_id=msg_id, use_pipeline=use_pipeline)
 
     elif action == "trigger_retention":
         lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
@@ -2061,10 +2145,10 @@ def gallery_notify():
         f"• Drive folder shared with client\n"
         f"• Gallery email delivered\n"
         f"• Balance invoice sent via Zoho\n\n"
-        f"Ready to run the retention sequence?"
+        f"Tap below when you confirm payment received in Zoho."
     )
-    # One CTA only
-    buttons = [[{"text": "⭐ Run Retention", "callback_data": f"trigger_retention|{lead_id}"}]]
+    # One CTA only — retention comes after balance is confirmed
+    buttons = [[{"text": "✅ Mark Balance Paid", "callback_data": f"balance_paid|{lead_id}"}]]
     requests.post(f"{PIPELINE_API}/sendMessage", json={
         "chat_id": CHAT_ID, "text": text,
         "parse_mode": "Markdown", "reply_markup": {"inline_keyboard": buttons}
