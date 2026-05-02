@@ -1813,13 +1813,13 @@ def deposit_confirmed():
     })
     return jsonify({"status": "ok"})
 
-@app.route("/gallery_delivered", methods=["POST"])
-def gallery_delivered():
+@app.route("/gallery_notify", methods=["POST"])
+def gallery_notify():
     data         = request.json
     lead_id      = data.get("lead_id",      "—")
-    client_name  = data.get("client_name",  "—")
+    client_name  = data.get("lead_name",    "—")
     project_id   = data.get("project_id",   "—")
-    gallery_link = data.get("gallery_link", "—")
+    gallery_link = data.get("gallery_url",   "—")
     delivery_date = data.get("delivery_date", "—")
 
     _write_back("Projects", "Projects!A1:Z200", "Lead_ID", lead_id, {
