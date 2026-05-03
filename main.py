@@ -1107,14 +1107,16 @@ def _update_client_stats(lead_id):
     total_bookings = 0
     
     for row in lead_rows:
-        if safe_get(row, lead_col, "Email") == client_email:
+        email_val = safe_get(row, lead_col, "Email")
+        if email_val != "—" and email_val.lower() == client_email.lower():
             status = safe_get(row, lead_col, "Lead_Status")
             # Only count if not lost
             if status != "Closed Lost":
-                budget_str = safe_get(row, lead_col, "Budget").replace("$", "").replace(",", "").strip()
+                budget_raw = safe_get(row, lead_col, "Budget")
+                budget_str = budget_raw.replace("$", "").replace(",", "").strip()
                 try:
                     # Filter out non-numeric budgets like "TBD"
-                    if budget_str and budget_str[0].isdigit() or (len(budget_str) > 1 and budget_str[0] == '$' and budget_str[1].isdigit()):
+                    if budget_str and (budget_str[0].isdigit() or (budget_str.startswith("-") and len(budget_str) > 1 and budget_str[1].isdigit())):
                         budget_val = float(budget_str.replace("$", ""))
                         total_ltv += budget_val
                         total_bookings += 1
