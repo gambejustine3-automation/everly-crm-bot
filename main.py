@@ -1557,8 +1557,9 @@ def handle_callbacks(data, use_pipeline=False):
             f"📅 Due: {due_date}\n\n"
             f"⚠️ Confirm you have received the full balance payment in Zoho?"
         )
+        # Pass msg_id (Gallery Delivered message) so confirm handler can strip its button too
         buttons = [[
-            {"text": "✅ Yes — Mark Paid", "callback_data": f"balance_paid_confirm|{target_id}"},
+            {"text": "✅ Yes — Mark Paid", "callback_data": f"balance_paid_confirm|{target_id}|{msg_id}"},
             {"text": "❌ Cancel",           "callback_data": f"view_project|{target_id}"}
         ]]
         send_pipeline_msg(CHAT_ID, text, {"inline_keyboard": buttons})
@@ -1570,12 +1571,15 @@ def handle_callbacks(data, use_pipeline=False):
     # then send the final "Balance Paid" result as a NEW message.
     # ─────────────────────────────────────────────
     elif action == "balance_paid_confirm":
-        today_str   = ph_now().strftime("%Y-%m-%d")
+        today_str      = ph_now().strftime("%Y-%m-%d")
+        # parts[2] carries the original Gallery Delivered message_id
+        gallery_msg_id = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+
         proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
         proj_row    = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == target_id), None)
-        client_name = safe_get(proj_row, proj_col, "Client_Name") if proj_row else "—"
-        project_id  = safe_get(proj_row, proj_col, "Project_ID")  if proj_row else "—"
-        balance     = safe_get(proj_row, proj_col, "Balance")      if proj_row else "—"
+        client_name = safe_get(proj_row, proj_col, "Client_Name")     if proj_row else "—"
+        project_id  = safe_get(proj_row, proj_col, "Project_ID")      if proj_row else "—"
+        balance     = safe_get(proj_row, proj_col, "Balance")          if proj_row else "—"
         due_date    = safe_get(proj_row, proj_col, "Balance_Due_Date") if proj_row else "—"
 
         _write_back("Projects", "Projects!A1:Z200", "Lead_ID", target_id, {
@@ -1588,7 +1592,19 @@ def handle_callbacks(data, use_pipeline=False):
         })
         answer_callback(cb["id"], "💰 Balance marked as paid!", use_pipeline)
 
-        # Strip the Yes/Cancel buttons from the confirmation prompt — no more dangling buttons
+        # Strip the "Mark Balance Paid" button from the original Gallery Delivered message
+        if gallery_msg_id:
+            gallery_stripped_text = (
+                f"📸 *System 4 — Gallery Delivered*\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 {client_name}\n"
+                f"🆔 Lead: `{target_id}` | Project: `{project_id}`\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"✅ Gallery delivered. Balance payment confirmed."
+            )
+            edit_pipeline_msg(chat_id, gallery_msg_id, gallery_stripped_text)
+
+        # Strip the Yes/Cancel buttons from the "Confirm Balance Paid?" prompt
         stripped_confirm_text = (
             f"💳 *Confirm Balance Paid*\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
