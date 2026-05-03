@@ -340,7 +340,6 @@ def init_scheduler():
 # ─────────────────────────────────────────────
 def send_daily_briefing():
     today = ph_now()
-    today_str = today.strftime("%Y-%m-%d")
     today_disp = today.strftime("%B %d, %Y")
     lines = [f"🌅 *Good morning! Daily Briefing — {today_disp}*\n"]
     buttons = []
@@ -433,7 +432,7 @@ def send_daily_briefing():
         try:
             for fmt in ("%Y-%m-%d", "%m/%d/%Y"):
                 try:
-                    nad_dt   = datetime.strptime(nad_str.strip(), fmt)
+                    nad_dt    = datetime.strptime(nad_str.strip(), fmt)
                     days_past = (today.date() - nad_dt.date()).days
                     if days_past >= 14:
                         stuck.append((r, days_past))
@@ -463,7 +462,7 @@ def send_daily_briefing():
         try:
             for fmt in ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y", "%Y-%m-%d"):
                 try:
-                    event_dt  = datetime.strptime(event_str.strip(), fmt)
+                    event_dt   = datetime.strptime(event_str.strip(), fmt)
                     days_until = (event_dt.date() - today.date()).days
                     if 0 <= days_until <= 7:
                         upcoming.append((r, days_until))
@@ -1292,11 +1291,6 @@ def _execute_retention(lead_id, processing_msg_id=None):
         "message_id":   processing_msg_id
     }
 
-# ─────────────────────────────────────────────
-# FIX: _execute_deliver_gallery
-# Was referenced by the deliver_gallery_confirm callback but never defined.
-# Writes project/pipeline updates and fires the DELIVER_GALLERY_WEBHOOK.
-# ─────────────────────────────────────────────
 def _execute_deliver_gallery(chat_id, msg_id, lead_id, cb_id, use_pipeline=False):
     proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
     proj_row    = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == lead_id), None)
@@ -1545,9 +1539,8 @@ def handle_callbacks(data, use_pipeline=False):
         _execute_deliver_gallery(chat_id, msg_id, target_id, cb["id"], use_pipeline=use_pipeline)
 
     # ─────────────────────────────────────────────
-    # FIX: balance_paid — Send NEW message so the
-    # System 4 Gallery Delivered notification stays
-    # intact in the pipeline bot.
+    # balance_paid — sends a NEW "Confirm Balance Paid?" message
+    # so the System 4 Gallery Delivered card stays untouched above it.
     # ─────────────────────────────────────────────
     elif action == "balance_paid":
         proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
@@ -1568,13 +1561,13 @@ def handle_callbacks(data, use_pipeline=False):
             {"text": "✅ Yes — Mark Paid", "callback_data": f"balance_paid_confirm|{target_id}"},
             {"text": "❌ Cancel",           "callback_data": f"view_project|{target_id}"}
         ]]
-        # Send as NEW message — preserves the Gallery Delivered notification above it
         send_pipeline_msg(CHAT_ID, text, {"inline_keyboard": buttons})
 
     # ─────────────────────────────────────────────
-    # FIX: balance_paid_confirm — Send NEW message
-    # so both the Gallery Delivered notification and
-    # the Balance Paid confirmation stay visible.
+    # FIX 1: balance_paid_confirm
+    # After confirming: strip the Yes/Cancel buttons from the
+    # "Confirm Balance Paid?" message by editing it in place,
+    # then send the final "Balance Paid" result as a NEW message.
     # ─────────────────────────────────────────────
     elif action == "balance_paid_confirm":
         today_str   = ph_now().strftime("%Y-%m-%d")
@@ -1583,6 +1576,7 @@ def handle_callbacks(data, use_pipeline=False):
         client_name = safe_get(proj_row, proj_col, "Client_Name") if proj_row else "—"
         project_id  = safe_get(proj_row, proj_col, "Project_ID")  if proj_row else "—"
         balance     = safe_get(proj_row, proj_col, "Balance")      if proj_row else "—"
+        due_date    = safe_get(proj_row, proj_col, "Balance_Due_Date") if proj_row else "—"
 
         _write_back("Projects", "Projects!A1:Z200", "Lead_ID", target_id, {
             "Balance_Paid": "TRUE"
@@ -1593,7 +1587,20 @@ def handle_callbacks(data, use_pipeline=False):
             "Next_Action_Date": today_str
         })
         answer_callback(cb["id"], "💰 Balance marked as paid!", use_pipeline)
-        text = (
+
+        # Strip the Yes/Cancel buttons from the confirmation prompt — no more dangling buttons
+        stripped_confirm_text = (
+            f"💳 *Confirm Balance Paid*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 {client_name} | Lead: `{target_id}`\n\n"
+            f"💰 Amount: *${balance}*\n"
+            f"📅 Due: {due_date}\n\n"
+            f"✅ *Confirmed — balance marked as paid.*"
+        )
+        edit_pipeline_msg(chat_id, msg_id, stripped_confirm_text)
+
+        # Send the actionable result as a fresh new message
+        result_text = (
             f"✅ *System 4 — Balance Paid*\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"👤 {client_name}\n"
@@ -1605,8 +1612,7 @@ def handle_callbacks(data, use_pipeline=False):
             f"Ready to send the retention sequence to the client?"
         )
         buttons = [[{"text": "⭐ Run Retention", "callback_data": f"trigger_retention_confirm|{target_id}"}]]
-        # Send as NEW message — preserves all previous System 4 notifications
-        send_pipeline_msg(CHAT_ID, text, {"inline_keyboard": buttons})
+        send_pipeline_msg(CHAT_ID, result_text, {"inline_keyboard": buttons})
 
     elif action == "trigger_retention_confirm":
         proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
@@ -1632,29 +1638,39 @@ def handle_callbacks(data, use_pipeline=False):
         ]]
         smart_send(chat_id, text, {"inline_keyboard": buttons}, msg_id=msg_id, use_pipeline=use_pipeline)
 
+    # ─────────────────────────────────────────────
+    # FIX 2 & 3: trigger_retention
+    # Strip the Yes/Cancel buttons from the confirmation message by editing it,
+    # then fire retention immediately — no "Processing..." message at all.
+    # ─────────────────────────────────────────────
     elif action == "trigger_retention":
-        if use_pipeline:
-            delete_pipeline_msg(chat_id, msg_id)
-        else:
-            delete_msg(chat_id, msg_id)
+        proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
+        proj_row    = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == target_id), None)
+        client_name = safe_get(proj_row, proj_col, "Client_Name") if proj_row else "—"
+        lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
+        lead_row     = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == target_id), None)
+        client_email = safe_get(lead_row, lead_col, "Email") if lead_row else "—"
 
-        proc_text = (
-            f"⭐ *Processing Retention Sequence for `{target_id}`...*\n"
-            f"_Please wait, this may take a moment._"
+        # Strip the Yes/Cancel buttons from the "Confirm Retention?" prompt
+        stripped_retention_confirm = (
+            f"⭐ *Confirm Retention Sequence*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 {client_name} | Lead: `{target_id}`\n"
+            f"✉️ Sending to: {client_email}\n\n"
+            f"✅ *Confirmed — retention sequence initiated.*"
         )
-        proc_resp   = send_pipeline_msg(CHAT_ID, proc_text)
-        proc_msg_id = None
-        if proc_resp and proc_resp.status_code == 200:
-            try:
-                proc_msg_id = proc_resp.json().get("result", {}).get("message_id")
-            except Exception:
-                pass
+        if use_pipeline:
+            edit_pipeline_msg(chat_id, msg_id, stripped_retention_confirm)
+        else:
+            edit_msg(chat_id, msg_id, stripped_retention_confirm)
 
         answer_callback(cb["id"], "⭐ Retention sequence initiated.", use_pipeline)
-        result = _execute_retention(target_id, processing_msg_id=proc_msg_id)
+
+        # Fire retention directly — no "Processing..." noise
+        result = _execute_retention(target_id, processing_msg_id=None)
 
         if not result["fired"]:
-            smart_send(chat_id, "⚠️ Webhook failed — check RETENTION_WEBHOOK in Railway.", use_pipeline=use_pipeline)
+            send_pipeline_msg(CHAT_ID, "⚠️ Webhook failed — check RETENTION_WEBHOOK in Railway.")
 
     return jsonify({"status": "ok"})
 
@@ -1751,16 +1767,9 @@ def dashboard():
             if len(parts) != 2:
                 send_msg(chat_id, "Usage: `/retention <Lead_ID>`")
                 return jsonify({"status": "ok"})
-            lead_id  = parts[1]
-            proc_text = f"⭐ *Processing Retention Sequence for `{lead_id}`...*\n_Please wait, this may take a moment._"
-            proc_resp = send_pipeline_msg(CHAT_ID, proc_text)
-            proc_msg_id = None
-            if proc_resp and proc_resp.status_code == 200:
-                try:
-                    proc_msg_id = proc_resp.json().get("result", {}).get("message_id")
-                except Exception:
-                    pass
-            result = _execute_retention(lead_id, processing_msg_id=proc_msg_id)
+            lead_id = parts[1]
+            # Fire directly — no "Processing..." message
+            result = _execute_retention(lead_id, processing_msg_id=None)
             if not result["fired"]:
                 send_msg(chat_id, "⚠️ Webhook failed — check RETENTION_WEBHOOK in Railway.")
         elif text.startswith("/setbudget"):
@@ -2086,6 +2095,7 @@ def retention_notify():
         f"🏁 *Status: Complete*"
     )
 
+    # message_id is always None now (no processing message), kept for safety
     msg_id_int = None
     if message_id:
         try:
