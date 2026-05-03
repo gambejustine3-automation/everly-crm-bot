@@ -36,6 +36,12 @@ DEPOSIT_PAID_WEBHOOK     = os.environ.get("DEPOSIT_PAID_WEBHOOK")
 DELIVER_GALLERY_WEBHOOK  = os.environ.get("DELIVER_GALLERY_WEBHOOK")
 RETENTION_WEBHOOK        = os.environ.get("RETENTION_WEBHOOK")
 
+# FIX: System 1.5B Call Outcome Email Routing webhook.
+# This MUST be the Zapier Catch Hook URL from the s1_5b Zap.
+# Without this, post-call follow-up emails (no-show, reschedule,
+# completed_continue) are NEVER sent to clients.
+CALL_OUTCOME_WEBHOOK     = os.environ.get("CALL_OUTCOME_WEBHOOK")
+
 # External Resources
 GOOGLE_REVIEW_LINK       = os.environ.get("GOOGLE_REVIEW_LINK", "https://g.page/r/YOUR_PLACE_ID/review")
 
@@ -53,16 +59,18 @@ PIPELINE_STAGES = [
     "Proposal Sent", "Contracted", "Active Project", "Delivered",
     "Retention", "Closed Won", "Closed Lost"
 ]
+
+# Projects sheet uses a separate stage schema from Pipeline Tracker.
+# Do NOT mix these two stage sets — they track different things.
+#   Pipeline Tracker = sales/relationship stage
+#   Projects         = production/delivery stage
 PROJECT_STAGES = [
     "Pre-Production", "Active", "Post-Production", "Delivered", "Completed", "Closed"
 ]
+
 STATUS_EMOJI = {"HOT": "🔴", "WARM": "🟡", "COLD": "🔵"}
 
-# ─────────────────────────────────────────────
-# UNCERTAIN BUDGETS — these require /setbudget confirmation
-# before System 3A can fire. Any value in this set means
-# the operator must supply an exact confirmed total.
-# ─────────────────────────────────────────────
+# Uncertain budgets require /setbudget confirmation before System 3A fires.
 UNCERTAIN_BUDGETS = {"$10,000+", "TBD", "10000+", "$10,000+ ", "10,000+"}
 
 OUTCOME_LABELS = {
@@ -82,6 +90,11 @@ OUTCOME_MAP = {
     "reschedule_oncall":   {"current_stage": "Discovery Call Booked",    "call_status": "Rescheduling — Client Request", "next_action": "Send new Cal.com link"},
     "booked_for_client":   {"current_stage": "Discovery Call Booked",    "call_status": "Booked by Victoria",            "next_action": "Confirm with client"}
 }
+
+# These outcomes trigger System 1.5B to send a follow-up email to the client.
+# "completed_stop" closes the lead — no email sent.
+# "booked_for_client" is an internal booking — no automated email needed.
+OUTCOMES_REQUIRING_EMAIL = {"completed_continue", "no_show", "reschedule", "reschedule_oncall"}
 
 # ─────────────────────────────────────────────
 # GOOGLE SHEETS HELPERS
@@ -133,10 +146,13 @@ def _write_back(sheet_name, range_name, lookup_col_name, lookup_value, updates):
         return False
 
     target_row = rows[found_row_idx]
-    updated_values = [v for v in target_row]
+    updated_values = list(target_row)
 
     for key, value in updates.items():
         if key in col:
+            # Extend the row list if necessary
+            while len(updated_values) <= col[key]:
+                updated_values.append("")
             updated_values[col[key]] = value
         else:
             print(f"[WRITE BACK WARNING] Column '{key}' not found in {sheet_name}. Skipping.")
@@ -147,7 +163,8 @@ def _write_back(sheet_name, range_name, lookup_col_name, lookup_value, updates):
 def safe_get(row, col, key):
     if key not in col or len(row) <= col[key]:
         return "—"
-    return row[col[key]] if row[col[key]] else "—"
+    val = row[col[key]]
+    return val if val else "—"
 
 def get_col_letter(idx):
     result = ""
@@ -179,11 +196,7 @@ def answer_callback(cb_id, text, use_pipeline=False):
 # TELEGRAM SEND/EDIT HELPERS
 # ─────────────────────────────────────────────
 def send_msg(chat_id, text, reply_markup=None):
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "Markdown",
-    }
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
     if reply_markup:
         payload["reply_markup"] = reply_markup
     r = requests.post(f"{DASHBOARD_API}/sendMessage", json=payload)
@@ -192,36 +205,22 @@ def send_msg(chat_id, text, reply_markup=None):
 
 def edit_msg(chat_id, message_id, text, reply_markup=None):
     payload = {
-        "chat_id": chat_id,
-        "message_id": message_id,
-        "text": text,
-        "parse_mode": "Markdown",
+        "chat_id": chat_id, "message_id": message_id,
+        "text": text, "parse_mode": "Markdown",
+        "reply_markup": reply_markup if reply_markup else {"inline_keyboard": []}
     }
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    else:
-        payload["reply_markup"] = {"inline_keyboard": []}
     requests.post(f"{DASHBOARD_API}/editMessageText", json=payload)
 
 def edit_pipeline_msg(chat_id, message_id, text, reply_markup=None):
     payload = {
-        "chat_id": chat_id,
-        "message_id": message_id,
-        "text": text,
-        "parse_mode": "Markdown",
+        "chat_id": chat_id, "message_id": message_id,
+        "text": text, "parse_mode": "Markdown",
+        "reply_markup": reply_markup if reply_markup else {"inline_keyboard": []}
     }
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    else:
-        payload["reply_markup"] = {"inline_keyboard": []}
     requests.post(f"{PIPELINE_API}/editMessageText", json=payload)
 
 def send_pipeline_msg(chat_id, text, reply_markup=None):
-    payload = {
-        "chat_id":    chat_id,
-        "text":       text,
-        "parse_mode": "Markdown",
-    }
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
     if reply_markup:
         payload["reply_markup"] = reply_markup
     r = requests.post(f"{PIPELINE_API}/sendMessage", json=payload)
@@ -230,8 +229,7 @@ def send_pipeline_msg(chat_id, text, reply_markup=None):
 def delete_pipeline_msg(chat_id, message_id):
     try:
         requests.post(f"{PIPELINE_API}/deleteMessage", json={
-            "chat_id": chat_id,
-            "message_id": message_id
+            "chat_id": chat_id, "message_id": message_id
         }, timeout=5)
     except Exception as e:
         print(f"[DELETE MSG] Failed: {e}")
@@ -239,17 +237,13 @@ def delete_pipeline_msg(chat_id, message_id):
 def delete_msg(chat_id, message_id):
     try:
         requests.post(f"{DASHBOARD_API}/deleteMessage", json={
-            "chat_id": chat_id,
-            "message_id": message_id
+            "chat_id": chat_id, "message_id": message_id
         }, timeout=5)
     except Exception as e:
         print(f"[DELETE MSG] Failed: {e}")
 
 def send_client_msg(chat_id, text):
-    requests.post(f"{CLIENT_API}/sendMessage", json={
-        "chat_id": chat_id,
-        "text": text
-    })
+    requests.post(f"{CLIENT_API}/sendMessage", json={"chat_id": chat_id, "text": text})
 
 def smart_send(chat_id, text, markup=None, msg_id=None, use_pipeline=False):
     if msg_id:
@@ -265,16 +259,12 @@ def smart_send(chat_id, text, markup=None, msg_id=None, use_pipeline=False):
 
 # ─────────────────────────────────────────────
 # CONFIG HELPERS
-# Config sheet layout (columns):
-#   A1: last_lead_number  B1: padded  C1: briefing_time
-#   A2: <counter>         B2: <val>   C2: <HH:MM value>
 # ─────────────────────────────────────────────
 def get_briefing_time():
     try:
         service = get_sheets_service()
         result = service.spreadsheets().values().get(
-            spreadsheetId=SPREADSHEET_ID,
-            range="Config!C2"
+            spreadsheetId=SPREADSHEET_ID, range="Config!C2"
         ).execute()
         values = result.get("values", [])
         if values and values[0] and values[0][0]:
@@ -289,8 +279,7 @@ def write_briefing_time(time_str):
     try:
         service = get_sheets_service()
         check = service.spreadsheets().values().get(
-            spreadsheetId=SPREADSHEET_ID,
-            range="Config!C1"
+            spreadsheetId=SPREADSHEET_ID, range="Config!C1"
         ).execute()
         c1_vals = check.get("values", [])
         if not c1_vals or not c1_vals[0]:
@@ -312,12 +301,7 @@ def run_daily_jobs():
 def reschedule_briefing(time_str):
     try:
         hour, minute = map(int, time_str.split(":"))
-        scheduler.reschedule_job(
-            'daily_jobs',
-            trigger='cron',
-            hour=hour,
-            minute=minute
-        )
+        scheduler.reschedule_job('daily_jobs', trigger='cron', hour=hour, minute=minute)
         print(f"[SCHEDULER] Rescheduled to {time_str} PH time")
     except Exception as e:
         print(f"[SCHEDULER] Reschedule error: {e}")
@@ -330,14 +314,8 @@ def init_scheduler():
         hour, minute = map(int, briefing_time.split(":"))
     except Exception:
         hour, minute = 9, 0
-    scheduler.add_job(
-        run_daily_jobs,
-        'cron',
-        hour=hour,
-        minute=minute,
-        id='daily_jobs',
-        replace_existing=True
-    )
+    scheduler.add_job(run_daily_jobs, 'cron', hour=hour, minute=minute,
+                      id='daily_jobs', replace_existing=True)
     scheduler.start()
     atexit.register(lambda: scheduler.shutdown())
     print(f"[SCHEDULER] Started — daily jobs at {hour:02d}:{minute:02d} PH time")
@@ -362,7 +340,7 @@ def send_daily_briefing():
         if stage in ("Completed", "Closed", "Closed Won", "Closed Lost"):
             continue
         balance_paid = safe_get(r, proj_col, "Balance_Paid")
-        if balance_paid and balance_paid.upper() == "TRUE":
+        if balance_paid.upper() == "TRUE":
             continue
         due_str = safe_get(r, proj_col, "Balance_Due_Date")
         if due_str == "—":
@@ -498,7 +476,7 @@ def send_daily_briefing():
         if stage != "Delivered":
             continue
         review_sent = safe_get(r, proj_col, "Review")
-        if review_sent and review_sent.upper() == "TRUE":
+        if review_sent.upper() == "TRUE":
             continue
         delivery_str = safe_get(r, proj_col, "Delivery_Date")
         if delivery_str == "—":
@@ -733,6 +711,24 @@ def handle_menu_command(chat_id):
     }
     send_msg(chat_id, text, markup)
 
+# FIX: nav_admin handler was missing — the Admin button in the menu did nothing.
+def handle_admin_menu(chat_id, msg_id=None, use_pipeline=False):
+    text = (
+        "⚙️ *Admin Panel*\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "Manage system settings and maintenance tasks."
+    )
+    markup = {
+        "inline_keyboard": [
+            [{"text": "📋 View Leads",       "callback_data": "nav_leads"},
+             {"text": "📊 View Pipeline",    "callback_data": "nav_pipe"}],
+            [{"text": "⏰ Send Briefing Now", "callback_data": "admin_briefing"},
+             {"text": "🔄 Reset Lead Counter","callback_data": "admin_reset_counter_confirm"}],
+            [{"text": "📅 Set Briefing Time", "callback_data": "admin_set_briefing_prompt"}]
+        ]
+    }
+    smart_send(chat_id, text, markup, msg_id, use_pipeline)
+
 def handle_leads_command(chat_id, msg_id=None, use_pipeline=False):
     rows, col = read_sheet_with_headers("Leads!A1:T200")
     lines = ["📋 *Latest Leads*\n━━━━━━━━━━━━━━━━━━━━"]
@@ -862,7 +858,7 @@ def handle_today_command(chat_id, msg_id=None, use_pipeline=False):
 
 def handle_search_command(chat_id, query, msg_id=None, use_pipeline=False):
     if not query:
-        smart_send(chat_id, "Usage: `/search <name or email>`", msg_id, use_pipeline)
+        smart_send(chat_id, "Usage: `/search <name or email>`", None, msg_id, use_pipeline)
         return
     lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
     matching_leads = []
@@ -887,7 +883,7 @@ def handle_search_command(chat_id, query, msg_id=None, use_pipeline=False):
 
 def handle_client_command(chat_id, client_id, msg_id=None, use_pipeline=False):
     if not client_id:
-        smart_send(chat_id, "Usage: `/client <Client_ID>`", msg_id, use_pipeline)
+        smart_send(chat_id, "Usage: `/client <Client_ID>`", None, msg_id, use_pipeline)
         return
     _show_client(chat_id, msg_id, client_id, method="edit", use_pipeline=use_pipeline)
 
@@ -898,7 +894,7 @@ def _show_lead(chat_id, msg_id, lead_id, use_pipeline=False):
     lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
     lead_row = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == lead_id), None)
     if not lead_row:
-        smart_send(chat_id, f"❌ Lead `{lead_id}` not found.", msg_id, use_pipeline)
+        smart_send(chat_id, f"❌ Lead `{lead_id}` not found.", None, msg_id, use_pipeline)
         return
 
     name               = safe_get(lead_row, lead_col, "Full_Name")
@@ -940,7 +936,7 @@ def _show_pipeline(chat_id, msg_id, lead_id, use_pipeline=False):
     pipe_rows, pipe_col = read_sheet_with_headers("Pipeline Tracker!A1:L200")
     pipe_row = next((r for r in pipe_rows if safe_get(r, pipe_col, "Lead_ID") == lead_id), None)
     if not pipe_row:
-        smart_send(chat_id, f"❌ Pipeline entry for `{lead_id}` not found.", msg_id, use_pipeline)
+        smart_send(chat_id, f"❌ Pipeline entry for `{lead_id}` not found.", None, msg_id, use_pipeline)
         return
 
     client_name      = safe_get(pipe_row, pipe_col, "Client_Name")
@@ -977,7 +973,7 @@ def _show_pipeline(chat_id, msg_id, lead_id, use_pipeline=False):
     ]
     if current_stage == "Discovery Call Completed":
         buttons.append([{"text": "📝 Send Proposal", "callback_data": f"send_proposal|{lead_id}"}])
-    if current_stage == "Proposal Sent":
+    if current_stage in ("Proposal Sent", "Contracted"):
         buttons.append([{"text": "📝 Send Contract", "callback_data": f"send_contract|{lead_id}"}])
 
     smart_send(chat_id, text, {"inline_keyboard": buttons}, msg_id, use_pipeline)
@@ -986,7 +982,7 @@ def _show_project(chat_id, msg_id, lead_id, use_pipeline=False):
     proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
     proj_row = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == lead_id), None)
     if not proj_row:
-        smart_send(chat_id, f"❌ Project for `{lead_id}` not found.", msg_id, use_pipeline)
+        smart_send(chat_id, f"❌ Project for `{lead_id}` not found.", None, msg_id, use_pipeline)
         return
 
     client_name      = safe_get(proj_row, proj_col, "Client_Name")
@@ -997,14 +993,16 @@ def _show_project(chat_id, msg_id, lead_id, use_pipeline=False):
     deposit_paid     = safe_get(proj_row, proj_col, "Deposit_Paid")
     balance          = safe_get(proj_row, proj_col, "Balance")
     balance_due_date = safe_get(proj_row, proj_col, "Balance_Due_Date")
+    balance_paid     = safe_get(proj_row, proj_col, "Balance_Paid")
     gallery_link     = safe_get(proj_row, proj_col, "Gallery_Folder_URL")
     delivery_date    = safe_get(proj_row, proj_col, "Delivery_Date")
     review_sent      = safe_get(proj_row, proj_col, "Review")
     upsell_sent      = safe_get(proj_row, proj_col, "Upsell_Sent")
 
-    deposit_label   = "✅ Yes" if deposit_paid.upper() == "TRUE" else "❌ No"
-    review_label    = "✅ Yes" if review_sent.upper() == "TRUE"  else "❌ No"
-    upsell_label    = "✅ Yes" if upsell_sent.upper() == "TRUE"  else "❌ No"
+    deposit_label   = "✅ Yes" if deposit_paid.upper() == "TRUE"  else "❌ No"
+    balance_label   = "✅ Yes" if balance_paid.upper() == "TRUE"  else "❌ No"
+    review_label    = "✅ Yes" if review_sent.upper()  == "TRUE"  else "❌ No"
+    upsell_label    = "✅ Yes" if upsell_sent.upper()  == "TRUE"  else "❌ No"
     gallery_display = f"[View Gallery]({gallery_link})" if gallery_link != "—" else "—"
 
     text = (
@@ -1017,6 +1015,7 @@ def _show_project(chat_id, msg_id, lead_id, use_pipeline=False):
         f"Total Value: ${total_value}\n"
         f"Deposit Paid: {deposit_label}\n"
         f"Balance: ${balance} (Due: {balance_due_date})\n"
+        f"Balance Paid: {balance_label}\n"
         f"Gallery: {gallery_display}\n"
         f"Delivery Date: {delivery_date}\n"
         f"Review Sent: {review_label}\n"
@@ -1027,6 +1026,13 @@ def _show_project(chat_id, msg_id, lead_id, use_pipeline=False):
         [{"text": "👤 View Lead",     "callback_data": f"view_lead|{lead_id}"}],
         [{"text": "📊 View Pipeline", "callback_data": f"view_pipe|{lead_id}"}],
     ]
+
+    # FIX: Show "Mark Balance Paid" on the project card for Delivered projects
+    # where balance has not yet been marked. Previously only the gallery delivery
+    # Telegram card had this button. Now the operator can do it from here too.
+    if current_stage == "Delivered" and balance_paid.upper() != "TRUE":
+        buttons.append([{"text": "💳 Mark Balance Paid", "callback_data": f"balance_paid|{lead_id}"}])
+
     if current_stage == "Delivered" and review_sent.upper() != "TRUE":
         buttons.append([{"text": "⭐ Run Retention", "callback_data": f"trigger_retention_confirm|{lead_id}"}])
 
@@ -1039,7 +1045,7 @@ def _show_client(chat_id, msg_id, client_id, method="edit", use_pipeline=False):
         None
     )
     if not client_row:
-        smart_send(chat_id, f"❌ Client `{client_id}` not found.", msg_id, use_pipeline)
+        smart_send(chat_id, f"❌ Client `{client_id}` not found.", None, msg_id, use_pipeline)
         return
 
     name       = safe_get(client_row, client_col, "Name")
@@ -1109,7 +1115,7 @@ def _execute_call_out(chat_id, msg_id, lead_id, outcome_key, cb_id, use_pipeline
     outcome_data = OUTCOME_MAP.get(outcome_key)
     if not outcome_data:
         answer_callback(cb_id, "Invalid outcome key.", use_pipeline)
-        smart_send(chat_id, "❌ Error: Invalid call outcome.", msg_id, use_pipeline)
+        smart_send(chat_id, "❌ Error: Invalid call outcome.", None, msg_id, use_pipeline)
         return
 
     current_stage = outcome_data["current_stage"]
@@ -1125,6 +1131,7 @@ def _execute_call_out(chat_id, msg_id, lead_id, outcome_key, cb_id, use_pipeline
         "Next_Action_Date": today_str
     })
 
+    # Cancel the Cal.com booking if the lead is rescheduling.
     if outcome_key in ("reschedule", "reschedule_oncall"):
         success, cal_response = cancel_cal_booking_for_lead(lead_id)
         if success:
@@ -1134,13 +1141,26 @@ def _execute_call_out(chat_id, msg_id, lead_id, outcome_key, cb_id, use_pipeline
     else:
         answer_callback(cb_id, "✅ Call outcome logged.", use_pipeline)
 
+    # FIX: Fire System 1.5B to send the appropriate follow-up email to the client.
+    # Previously this webhook was NEVER fired, so clients never received post-call
+    # emails (no-show recovery, reschedule link, or post-call follow-up).
+    # CALL_OUTCOME_WEBHOOK must be set to the System 1.5B Zapier Catch Hook URL.
+    if outcome_key in OUTCOMES_REQUIRING_EMAIL:
+        fired_email = fire_webhook(CALL_OUTCOME_WEBHOOK, {
+            "lead_id": lead_id,
+            "action":  outcome_key
+        })
+        if not fired_email:
+            print(f"[CALL OUTCOME] 1.5B email webhook failed for {lead_id} / {outcome_key}")
+
+    # Close the lead in CRM if this is a permanent stop.
     if outcome_key == "completed_stop":
         fire_webhook(CLOSE_LEAD_WEBHOOK, {"lead_id": lead_id, "outcome": outcome_key})
 
     if outcome_key == "completed_continue":
         _show_pipeline(chat_id, msg_id, lead_id, use_pipeline=use_pipeline)
     else:
-        smart_send(chat_id, f"✅ Call outcome for `{lead_id}` set to *{call_status}*.", msg_id, use_pipeline)
+        smart_send(chat_id, f"✅ Call outcome for `{lead_id}` set to *{call_status}*.", None, msg_id, use_pipeline)
 
 def _confirm_contract(chat_id, msg_id, lead_id, use_pipeline=False):
     lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
@@ -1336,7 +1356,7 @@ def _execute_deliver_gallery(chat_id, msg_id, lead_id, cb_id, use_pipeline=False
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"{'✅ Webhook fired — gallery delivery sequence started.' if fired else '⚠️ Webhook failed — check DELIVER_GALLERY_WEBHOOK in Railway.'}"
     )
-    smart_send(chat_id, text, msg_id=msg_id, use_pipeline=use_pipeline)
+    smart_send(chat_id, text, None, msg_id, use_pipeline)
 
 # ─────────────────────────────────────────────
 # SHARED CALLBACK HANDLER
@@ -1390,6 +1410,48 @@ def handle_callbacks(data, use_pipeline=False):
     elif action == "nav_today":
         handle_today_command(chat_id, msg_id=msg_id, use_pipeline=use_pipeline)
 
+    # FIX: nav_admin was completely missing — clicking the Admin button in the
+    # main menu did nothing. Now it opens the Admin Panel.
+    elif action == "nav_admin":
+        handle_admin_menu(chat_id, msg_id=msg_id, use_pipeline=use_pipeline)
+
+    # Admin panel sub-actions
+    elif action == "admin_briefing":
+        answer_callback(cb["id"], "Sending briefing...", use_pipeline)
+        send_daily_briefing()
+
+    elif action == "admin_reset_counter_confirm":
+        text = (
+            "⚠️ *Reset Lead Counter*\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "This will reset the Lead ID counter to 0.\n"
+            "The next lead created will be `LED-0001`.\n\n"
+            "⚠️ *Only do this before demos or testing.*\n"
+            "Are you sure?"
+        )
+        buttons = [
+            [{"text": "✅ Yes — Reset Counter", "callback_data": "admin_reset_counter_execute"}],
+            [{"text": "❌ Cancel",               "callback_data": "nav_admin"}]
+        ]
+        smart_send(chat_id, text, {"inline_keyboard": buttons}, msg_id, use_pipeline)
+
+    elif action == "admin_reset_counter_execute":
+        write_sheet("Config!A2", [[0]])
+        write_sheet("Config!B2", [["0001"]])
+        answer_callback(cb["id"], "✅ Counter reset!", use_pipeline)
+        smart_send(chat_id, "✅ Lead counter reset to 0. Next lead will be LED-0001.", None, msg_id, use_pipeline)
+
+    elif action == "admin_set_briefing_prompt":
+        text = (
+            "⏰ *Set Daily Briefing Time*\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "Type the command below with your desired time:\n\n"
+            "`/setbriefingtime HH:MM`\n\n"
+            "Example: `/setbriefingtime 08:30`\n"
+            "Uses 24-hour PH time format."
+        )
+        smart_send(chat_id, text, None, msg_id, use_pipeline)
+
     elif action == "upd_lead" and len(parts) > 2:
         new_status = parts[2]
         _write_back("Leads", "Leads!A1:T200", "Lead_ID", target_id, {"Lead_Status": new_status})
@@ -1430,25 +1492,20 @@ def handle_callbacks(data, use_pipeline=False):
             if fired else
             f"⚠️ Webhook failed — check PROPOSAL_ZAPIER_WEBHOOK in Railway."
         )
-        smart_send(chat_id, msg_text, msg_id=msg_id, use_pipeline=use_pipeline)
+        smart_send(chat_id, msg_text, None, msg_id, use_pipeline)
 
     elif action in ("send_contract", "confirm_contract"):
         _confirm_contract(chat_id, msg_id, target_id, use_pipeline=use_pipeline)
 
     elif action == "contract_yes":
-        # ─────────────────────────────────────────────────────────────
-        # READ CURRENT BUDGET FROM LEADS SHEET
-        # If budget is uncertain ($10,000+, TBD, etc.) the operator
-        # MUST use /setbudget first. We gate here so that no contract
-        # ever fires without a confirmed numeric total.
-        # ─────────────────────────────────────────────────────────────
+        # Gate: Budget must be confirmed before System 3A fires.
+        # If budget is uncertain, prompt operator to use /setbudget first.
         lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
         lead_row = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == target_id), None)
         budget   = safe_get(lead_row, lead_col, "Budget").strip() if lead_row else ""
         name     = safe_get(lead_row, lead_col, "Full_Name")      if lead_row else target_id
 
         if budget in UNCERTAIN_BUDGETS:
-            # Budget is not confirmed yet — ask operator to supply exact total
             answer_callback(cb["id"], "Budget unclear — enter exact amount first", use_pipeline)
             prompt_text = (
                 f"💰 *Budget Confirmation Required*\n"
@@ -1460,12 +1517,8 @@ def handle_callbacks(data, use_pipeline=False):
                 f"`/setbudget {target_id} <amount>`\n\n"
                 f"*Example:* `/setbudget {target_id} 13000`"
             )
-            if use_pipeline:
-                edit_pipeline_msg(chat_id, msg_id, prompt_text)
-            else:
-                edit_msg(chat_id, msg_id, prompt_text)
+            smart_send(chat_id, prompt_text, None, msg_id, use_pipeline)
         else:
-            # Budget is a known numeric value — fire contract immediately
             fired = fire_webhook(CONTRACT_ZAPIER_WEBHOOK, {"lead_id": target_id})
             answer_callback(cb["id"], "✅ Contract triggered", use_pipeline)
             confirmed_text = (
@@ -1477,10 +1530,7 @@ def handle_callbacks(data, use_pipeline=False):
                 f"⚠️ *Webhook failed for `{target_id}`*\n"
                 f"Check CONTRACT_ZAPIER_WEBHOOK in Railway."
             )
-            if use_pipeline:
-                edit_pipeline_msg(chat_id, msg_id, confirmed_text)
-            else:
-                edit_msg(chat_id, msg_id, confirmed_text)
+            smart_send(chat_id, confirmed_text, None, msg_id, use_pipeline)
 
     elif action == "contract_no":
         _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", target_id, {
@@ -1490,39 +1540,14 @@ def handle_callbacks(data, use_pipeline=False):
             "Next_Action_Date": ph_now().strftime("%Y-%m-%d")
         })
         answer_callback(cb["id"], "❌ Contract declined. Lead closed.", use_pipeline)
-        smart_send(chat_id, f"❌ Lead `{target_id}` closed due to contract decline.", msg_id, use_pipeline)
+        smart_send(chat_id, f"❌ Lead `{target_id}` closed due to contract decline.", None, msg_id, use_pipeline)
 
-    # ─────────────────────────────────────────────────────────────────
-    # budget_contract_yes
-    # ─────────────────────────────────────────────────────────────────
-    # FIX #1: This is where the $17,000 was getting lost.
-    #
-    # Previously this handler:
-    #   1. Wrote the new Budget back to the Leads sheet ✓
-    #   2. Fired the webhook with ONLY {"lead_id": lead_id} ✗
-    #
-    # Zapier System 3A Node 4 (the Python code block) reads
-    # total_price / deposit / balance directly from the webhook payload
-    # (Step 1 → gives["361683933"]["total_price"]). When those fields
-    # are absent the code falls through to PRICE_MAP and picks up
-    # "Elite Package" → $15,000 instead of the confirmed $17,000.
-    #
-    # FIX: include total_price, deposit, balance in the webhook payload
-    # so Zapier's PRIORITY-1 branch fires and the confirmed amounts
-    # propagate all the way through to the contract, invoice, and
-    # Google Sheets columns H/I/J of the Projects sheet.
-    #
-    # We also write Total_Price / Deposit / Balance directly into the
-    # Projects sheet here so the Python side stays in sync with whatever
-    # Zapier writes later (idempotent — last write wins in Sheets).
-    # ─────────────────────────────────────────────────────────────────
     elif action == "budget_contract_yes" and len(parts) > 2:
         lead_id      = target_id
         total_amount = parts[2]
 
-        # Parse into integers for precise arithmetic
         try:
-            total   = int(float(total_amount))
+            total = int(float(total_amount))
         except (ValueError, TypeError):
             answer_callback(cb["id"], "❌ Invalid amount — could not parse.", use_pipeline)
             return jsonify({"status": "ok"})
@@ -1530,23 +1555,13 @@ def handle_callbacks(data, use_pipeline=False):
         deposit = round(total * 0.30)
         balance = total - deposit
 
-        # 1. Persist the confirmed budget back to the Leads sheet so
-        #    it is visible in every future lead card view.
-        _write_back("Leads", "Leads!A1:T200", "Lead_ID", lead_id, {
-            "Budget": str(total)
-        })
-
-        # 2. Persist pricing into the Projects sheet so the project card
-        #    immediately reflects the confirmed amounts.
+        _write_back("Leads", "Leads!A1:T200", "Lead_ID", lead_id, {"Budget": str(total)})
         _write_back("Projects", "Projects!A1:Z200", "Lead_ID", lead_id, {
             "Total_Price": str(total),
             "Deposit":     str(deposit),
             "Balance":     str(balance)
         })
 
-        # 3. Fire System 3A webhook WITH pricing payload so Zapier's
-        #    PRIORITY-1 branch uses total_price/deposit/balance instead
-        #    of falling through to PRICE_MAP.
         fired = fire_webhook(CONTRACT_ZAPIER_WEBHOOK, {
             "lead_id":     lead_id,
             "total_price": str(total),
@@ -1568,7 +1583,7 @@ def handle_callbacks(data, use_pipeline=False):
             f"⚠️ *Webhook failed for `{lead_id}`*\n"
             f"Check CONTRACT_ZAPIER_WEBHOOK in Railway."
         )
-        smart_send(chat_id, confirmed_text, msg_id=msg_id, use_pipeline=use_pipeline)
+        smart_send(chat_id, confirmed_text, None, msg_id, use_pipeline)
 
     elif action == "budget_contract_edit":
         lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
@@ -1584,26 +1599,26 @@ def handle_callbacks(data, use_pipeline=False):
             f"`/setbudget {target_id} <amount>`\n\n"
             f"*Example:* `/setbudget {target_id} 13000`"
         )
-        smart_send(chat_id, prompt_text, msg_id=msg_id, use_pipeline=use_pipeline)
+        smart_send(chat_id, prompt_text, None, msg_id, use_pipeline)
 
-    # ─────────────────────────────────────────────────────────────────
-    # deposit_paid_confirm  ← FIRST CONFIRMATION PROMPT
-    # ─────────────────────────────────────────────────────────────────
-    # FIX #2: This handler previously EXECUTED the deposit action
-    # directly. Clicking the button wrote to Sheets and advanced the
-    # stage with zero confirmation — and the button itself was missing
-    # from /invoice_sent (see that route below for Fix #3).
-    #
-    # Renamed semantics:
-    #   deposit_paid_confirm  → shows the confirmation dialog
-    #   deposit_paid_execute  → actually marks paid + fires System 4
-    # ─────────────────────────────────────────────────────────────────
     elif action == "deposit_paid_confirm":
+        # FIX: This used to EXECUTE the deposit action directly without confirmation.
+        # Now it shows a proper confirmation dialog first.
         proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
         proj_row    = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == target_id), None)
         client_name = safe_get(proj_row, proj_col, "Client_Name") if proj_row else "—"
         project_id  = safe_get(proj_row, proj_col, "Project_ID")  if proj_row else "—"
         deposit     = safe_get(proj_row, proj_col, "Deposit")      if proj_row else "—"
+        deposit_paid_flag = safe_get(proj_row, proj_col, "Deposit_Paid") if proj_row else "—"
+
+        # Idempotency guard: don't allow double-marking.
+        if deposit_paid_flag.upper() == "TRUE":
+            answer_callback(cb["id"], "Already marked as paid!", use_pipeline)
+            smart_send(chat_id,
+                f"ℹ️ Deposit for `{target_id}` is already marked as paid.",
+                None, msg_id, use_pipeline
+            )
+            return jsonify({"status": "ok"})
 
         answer_callback(cb["id"], "Confirm deposit payment 👇", use_pipeline)
         text = (
@@ -1615,8 +1630,8 @@ def handle_callbacks(data, use_pipeline=False):
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
             f"Have you confirmed this payment in Zoho?\n\n"
             f"Pressing *Yes* will:\n"
-            f"  • Mark the deposit as paid\n"
-            f"  • Move the project to Active stage\n"
+            f"  • Mark the deposit as paid in Google Sheets\n"
+            f"  • Move the project to Pre-Production stage\n"
             f"  • Unlock the pre-production workflow"
         )
         buttons = [
@@ -1625,23 +1640,9 @@ def handle_callbacks(data, use_pipeline=False):
         ]
         send_pipeline_msg(CHAT_ID, text, {"inline_keyboard": buttons})
 
-    # ─────────────────────────────────────────────────────────────────
-    # deposit_paid_execute  ← EXECUTES THE DEPOSIT CONFIRMATION
-    # ─────────────────────────────────────────────────────────────────
-    # Called after the operator presses "Yes — Mark Deposit Paid" in
-    # the confirmation dialog above.
-    #
-    # On success:
-    #   • Writes Deposit_Paid = TRUE to the Projects sheet
-    #   • Advances Pipeline Tracker to Active Project
-    #   • Edits the invoice message to remove the Mark Deposit Paid
-    #     button so it cannot be clicked a second time
-    #   • Edits the confirm dialog to a completed/locked state
-    #   • Sends a fresh success card
-    # ─────────────────────────────────────────────────────────────────
     elif action == "deposit_paid_execute":
-        today_str        = ph_now().strftime("%Y-%m-%d")
-        invoice_msg_id   = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+        today_str      = ph_now().strftime("%Y-%m-%d")
+        invoice_msg_id = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
 
         proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
         proj_row    = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == target_id), None)
@@ -1650,11 +1651,24 @@ def handle_callbacks(data, use_pipeline=False):
         deposit     = safe_get(proj_row, proj_col, "Deposit")      if proj_row else "—"
         balance     = safe_get(proj_row, proj_col, "Balance")      if proj_row else "—"
 
-        # Write to sheets
+        # Idempotency guard.
+        deposit_paid_flag = safe_get(proj_row, proj_col, "Deposit_Paid") if proj_row else "—"
+        if deposit_paid_flag.upper() == "TRUE":
+            answer_callback(cb["id"], "Already marked as paid!", use_pipeline)
+            edit_pipeline_msg(chat_id, msg_id, (
+                f"⚠️ *Confirm Deposit Payment*\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 {client_name} | Lead: `{target_id}`\n\n"
+                f"ℹ️ *Already confirmed — deposit was already marked as paid.*"
+            ))
+            return jsonify({"status": "ok"})
+
+        # FIX: Projects stage after deposit was "Active Project" which is not a valid
+        # Projects stage. Correct stage is "Pre-Production" (project confirmed, work begins).
+        # Pipeline Tracker correctly uses "Active Project" as its own stage schema.
         _write_back("Projects", "Projects!A1:Z200", "Lead_ID", target_id, {
             "Deposit_Paid":  "TRUE",
-            "Balance_Paid":  "FALSE",
-            "Current_Stage": "Active Project"
+            "Current_Stage": "Pre-Production"     # was incorrectly "Active Project"
         })
         _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", target_id, {
             "Current_Stage":    "Active Project",
@@ -1665,8 +1679,7 @@ def handle_callbacks(data, use_pipeline=False):
 
         answer_callback(cb["id"], "💰 Deposit marked as paid!", use_pipeline)
 
-        # Lock the original invoice message — remove the button so it
-        # cannot be clicked again
+        # Lock the original invoice message — remove the button.
         if invoice_msg_id:
             edit_pipeline_msg(chat_id, invoice_msg_id, (
                 f"🧾 *Deposit Invoice Sent*\n"
@@ -1677,7 +1690,7 @@ def handle_callbacks(data, use_pipeline=False):
                 f"✅ *Deposit confirmed paid — {today_str}*"
             ))
 
-        # Lock the confirmation dialog
+        # Lock the confirmation dialog.
         edit_pipeline_msg(chat_id, msg_id, (
             f"⚠️ *Confirm Deposit Payment*\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -1685,7 +1698,7 @@ def handle_callbacks(data, use_pipeline=False):
             f"✅ *Confirmed — deposit marked as paid.*"
         ))
 
-        # Send a fresh success card
+        # Send fresh success card.
         send_pipeline_msg(CHAT_ID, (
             f"💰 *Deposit Payment Confirmed — System 3C*\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -1696,21 +1709,30 @@ def handle_callbacks(data, use_pipeline=False):
             f"📅 Confirmed: {today_str}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
             f"✅ Deposit confirmed paid.\n"
-            f"Project moved to *Active Project* stage.\n"
+            f"Project moved to *Pre-Production* stage.\n"
             f"Pre-production workflow is now unlocked."
         ))
 
     elif action == "deliver_gallery_confirm":
         _execute_deliver_gallery(chat_id, msg_id, target_id, cb["id"], use_pipeline=use_pipeline)
 
-    # ── balance_paid: sends a NEW confirmation message so the
-    # System 4 Gallery Delivered card above stays untouched.
     elif action == "balance_paid":
         proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
         proj_row    = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == target_id), None)
         client_name = safe_get(proj_row, proj_col, "Client_Name")     if proj_row else "—"
         balance     = safe_get(proj_row, proj_col, "Balance")          if proj_row else "—"
         due_date    = safe_get(proj_row, proj_col, "Balance_Due_Date") if proj_row else "—"
+        balance_paid_flag = safe_get(proj_row, proj_col, "Balance_Paid") if proj_row else "—"
+
+        # Idempotency guard.
+        if balance_paid_flag.upper() == "TRUE":
+            answer_callback(cb["id"], "Already marked as paid!", use_pipeline)
+            smart_send(chat_id,
+                f"ℹ️ Balance for `{target_id}` is already marked as paid.",
+                None, msg_id, use_pipeline
+            )
+            return jsonify({"status": "ok"})
+
         answer_callback(cb["id"], "Confirm balance payment below 👇", use_pipeline)
         text = (
             f"💳 *Confirm Balance Paid*\n"
@@ -1726,8 +1748,6 @@ def handle_callbacks(data, use_pipeline=False):
         ]]
         send_pipeline_msg(CHAT_ID, text, {"inline_keyboard": buttons})
 
-    # ── balance_paid_confirm: strips buttons from both the gallery card
-    # and the confirm prompt, then sends a fresh actionable result card.
     elif action == "balance_paid_confirm":
         today_str      = ph_now().strftime("%Y-%m-%d")
         gallery_msg_id = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
@@ -1738,6 +1758,18 @@ def handle_callbacks(data, use_pipeline=False):
         project_id  = safe_get(proj_row, proj_col, "Project_ID")      if proj_row else "—"
         balance     = safe_get(proj_row, proj_col, "Balance")          if proj_row else "—"
         due_date    = safe_get(proj_row, proj_col, "Balance_Due_Date") if proj_row else "—"
+        balance_paid_flag = safe_get(proj_row, proj_col, "Balance_Paid") if proj_row else "—"
+
+        # Idempotency guard.
+        if balance_paid_flag.upper() == "TRUE":
+            answer_callback(cb["id"], "Already marked as paid!", use_pipeline)
+            edit_pipeline_msg(chat_id, msg_id, (
+                f"💳 *Confirm Balance Paid*\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 {client_name} | Lead: `{target_id}`\n\n"
+                f"ℹ️ *Already confirmed — balance was already marked as paid.*"
+            ))
+            return jsonify({"status": "ok"})
 
         _write_back("Projects", "Projects!A1:Z200", "Lead_ID", target_id, {
             "Balance_Paid": "TRUE"
@@ -1749,7 +1781,6 @@ def handle_callbacks(data, use_pipeline=False):
         })
         answer_callback(cb["id"], "💰 Balance marked as paid!", use_pipeline)
 
-        # Strip button from the original Gallery Delivered card
         if gallery_msg_id:
             edit_pipeline_msg(chat_id, gallery_msg_id, (
                 f"📸 *System 4 — Gallery Delivered*\n"
@@ -1760,7 +1791,6 @@ def handle_callbacks(data, use_pipeline=False):
                 f"✅ Gallery delivered. Balance payment confirmed."
             ))
 
-        # Strip buttons from the Confirm Balance Paid prompt
         edit_pipeline_msg(chat_id, msg_id, (
             f"💳 *Confirm Balance Paid*\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -1770,7 +1800,6 @@ def handle_callbacks(data, use_pipeline=False):
             f"✅ *Confirmed — balance marked as paid.*"
         ))
 
-        # Send fresh result card with retention CTA
         send_pipeline_msg(CHAT_ID, (
             f"✅ *System 4 — Balance Paid*\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -1815,7 +1844,6 @@ def handle_callbacks(data, use_pipeline=False):
         lead_row     = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == target_id), None)
         client_email = safe_get(lead_row, lead_col, "Email") if lead_row else "—"
 
-        # Strip the Yes/Cancel buttons from the confirm prompt
         stripped_text = (
             f"⭐ *Confirm Retention Sequence*\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -1934,22 +1962,6 @@ def dashboard():
             if not result["fired"]:
                 send_msg(chat_id, "⚠️ Webhook failed — check RETENTION_WEBHOOK in Railway.")
         elif text.startswith("/setbudget"):
-            # ─────────────────────────────────────────────────────────
-            # /setbudget <Lead_ID> <amount>
-            #
-            # Used for leads where the Budget field contains an
-            # uncertain value like "$10,000+" or "TBD". The operator
-            # supplies the exact confirmed total here. The command:
-            #
-            #   1. Parses the amount into integer cents
-            #   2. Calculates deposit (30%) and balance (70%)
-            #   3. Shows a clear summary card with a Confirm button
-            #
-            # The actual Leads/Projects sheet write + webhook fire
-            # happens in the budget_contract_yes callback so the
-            # operator gets one final visual confirmation before
-            # anything irreversible happens.
-            # ─────────────────────────────────────────────────────────
             parts = text.split(maxsplit=2)
             if len(parts) != 3:
                 send_msg(chat_id,
@@ -2149,18 +2161,10 @@ def proposal_notify():
     })
     return jsonify({"status": "ok"})
 
-# ─────────────────────────────────────────────
-# /invoice_sent — System 3B post-signature notification
-#
-# FIX #3: The previous version sent this message with NO reply_markup
-# at all, which meant the "Mark Deposit Paid" button literally never
-# appeared in Telegram. The message body was correct but the
-# inline_keyboard was absent from the API call.
-#
-# The button callback is deposit_paid_confirm|{lead_id}. That handler
-# now shows a confirmation dialog (not execute directly). The actual
-# sheet write happens in deposit_paid_execute after the second tap.
-# ─────────────────────────────────────────────
+# System 3B post-signature notification.
+# IMPORTANT: The Zapier s3b.json step 17 does NOT include invoice_link in its
+# payload. This field will display as "—" until that Zapier step is updated to
+# include the Zoho invoice URL. The rest of the card is fully functional.
 @app.route("/invoice_sent", methods=["POST"])
 def invoice_sent():
     data         = request.json
@@ -2184,6 +2188,8 @@ def invoice_sent():
         "Next_Action_Date": ph_now().strftime("%Y-%m-%d")
     })
 
+    invoice_display = f"[View Invoice]({invoice_link})" if invoice_link != "—" else "_(link not provided)_"
+
     text = (
         f"🧾 *Deposit Invoice Sent — System 3B*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -2193,19 +2199,15 @@ def invoice_sent():
         f"💰 Deposit Due: *${deposit}*\n"
         f"📅 Invoice Date: {invoice_date}\n"
         f"📅 Due Date: {due_date}\n"
-        f"📄 [View Invoice]({invoice_link})\n"
+        f"📄 {invoice_display}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"✅ Deposit invoice sent to client.\n"
         f"Tap the button below once you confirm\n"
         f"payment has been received in Zoho."
     )
-
-    # FIX: reply_markup was missing from the original — button never appeared.
-    # The callback deposit_paid_confirm shows a confirmation dialog first;
-    # the actual execution happens in deposit_paid_execute after the operator taps Yes.
     buttons = [[{"text": "✅ Mark Deposit Paid", "callback_data": f"deposit_paid_confirm|{lead_id}"}]]
 
-    requests.post(f"{PIPELINE_API}/sendMessage", json={
+    r = requests.post(f"{PIPELINE_API}/sendMessage", json={
         "chat_id":      CHAT_ID,
         "text":         text,
         "parse_mode":   "Markdown",
@@ -2222,9 +2224,11 @@ def deposit_confirmed():
     deposit_amt  = data.get("deposit_amount", "—")
     payment_date = data.get("payment_date",   "—")
 
+    # FIX: Projects stage after deposit was "Active Project" which is not a
+    # valid Projects stage. Correct stage is "Pre-Production".
     _write_back("Projects", "Projects!A1:Z200", "Lead_ID", lead_id, {
         "Deposit_Paid":  "TRUE",
-        "Current_Stage": "Active Project"
+        "Current_Stage": "Pre-Production"     # was incorrectly "Active Project"
     })
     _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", lead_id, {
         "Current_Stage":    "Active Project",
@@ -2242,7 +2246,7 @@ def deposit_confirmed():
         f"📅 Received: {payment_date}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"✅ Deposit payment confirmed in Zoho.\n"
-        f"Project is now *Active* and ready for pre-production."
+        f"Project is now in *Pre-Production* stage."
     )
     requests.post(f"{PIPELINE_API}/sendMessage", json={
         "chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"
@@ -2292,13 +2296,10 @@ def gallery_notify():
     })
     return jsonify({"status": "ok"})
 
-# ─────────────────────────────────────────────
-# ZAPIER — System 5 Review Request
-#
+# System 5 Review Request.
 # CRITICAL: Does NOT set Current_Stage = "Completed".
-# Projects must stay "Delivered" so APScheduler can find the row
-# after 7 days and auto-complete via check_retention_completions().
-# ─────────────────────────────────────────────
+# Projects must stay "Delivered" so APScheduler finds the row
+# after 7 days and auto-completes via check_retention_completions().
 @app.route("/retention_notify", methods=["POST"])
 def retention_notify():
     data        = request.json
@@ -2315,7 +2316,6 @@ def retention_notify():
     today_str  = ph_now().strftime("%Y-%m-%d")
 
     # Write review flags only — do NOT set Current_Stage = "Completed".
-    # Project must stay "Delivered" so APScheduler auto-completes after 7 days.
     _write_back("Projects", "Projects!A1:Z200", "Lead_ID", lead_id, {
         "Review":           "TRUE",
         "Review_Sent_Date": today_str
@@ -2342,7 +2342,6 @@ def retention_notify():
         f"🏁 *Status: Complete*"
     )
 
-    # Delete the processing message if one was passed (legacy safety net)
     msg_id_int = None
     if message_id:
         try:
@@ -2355,10 +2354,11 @@ def retention_notify():
     send_pipeline_msg(CHAT_ID, text)
     return jsonify({"status": "ok"})
 
-# ─────────────────────────────────────────────
-# ZAPIER — System 5 Rebooking Upsell
-# ─────────────────────────────────────────────
+# System 5 Rebooking Upsell.
+# NOTE: The s5.json Zapier step 8 currently fires to /retention_5b_notify.
+# This route also accepts that path via the alias below so both URLs work.
 @app.route("/retention_rebooking_notify", methods=["POST"])
+@app.route("/retention_5b_notify", methods=["POST"])   # alias for s5.json compatibility
 def retention_rebooking_notify():
     data        = request.json
     lead_id     = data.get("lead_id",     "—")
@@ -2371,7 +2371,6 @@ def retention_rebooking_notify():
     _write_back("Projects", "Projects!A1:Z200", "Lead_ID", lead_id, {
         "Upsell_Sent": "TRUE"
     })
-    # Pipeline → Closed Won (idempotent alongside APScheduler)
     _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", lead_id, {
         "Current_Stage":    "Closed Won",
         "Last_Action":      "Rebooking Email Sent",
