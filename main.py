@@ -1108,20 +1108,26 @@ def _update_client_stats(lead_id):
     
     for row in lead_rows:
         email_val = safe_get(row, lead_col, "Email")
-        if email_val != "—" and email_val.lower() == client_email.lower():
-            status = safe_get(row, lead_col, "Lead_Status")
-            # Only count if not lost
-            if status != "Closed Lost":
-                budget_raw = safe_get(row, lead_col, "Budget")
-                budget_str = budget_raw.replace("$", "").replace(",", "").strip()
-                try:
-                    # Filter out non-numeric budgets like "TBD"
-                    if budget_str and (budget_str[0].isdigit() or (budget_str.startswith("-") and len(budget_str) > 1 and budget_str[1].isdigit())):
-                        budget_val = float(budget_str)
-                        total_ltv += budget_val
-                        total_bookings += 1
-                except ValueError:
-                    pass
+        row_lead_id = safe_get(row, lead_col, "Lead_ID")
+        # Match by email (preferred) or by Lead_ID as fallback when email is missing
+        email_match = (email_val != "—" and client_email != "—" and
+                       email_val.lower() == client_email.lower())
+        id_match = (row_lead_id == lead_id)
+        if not (email_match or id_match):
+            continue
+        status = safe_get(row, lead_col, "Lead_Status")
+        # Only count if not lost
+        if status != "Closed Lost":
+            total_bookings += 1  # Count every non-lost booking regardless of budget
+            budget_raw = safe_get(row, lead_col, "Budget")
+            budget_str = budget_raw.replace("$", "").replace(",", "").strip()
+            try:
+                # Filter out non-numeric budgets like "TBD"
+                if budget_str and (budget_str[0].isdigit() or (budget_str.startswith("-") and len(budget_str) > 1 and budget_str[1].isdigit())):
+                    budget_val = float(budget_str)
+                    total_ltv += budget_val
+            except ValueError:
+                pass
     
     # Determine Tier
     tier = "Standard"
@@ -1132,10 +1138,11 @@ def _update_client_stats(lead_id):
         
     return {"ltv": int(total_ltv), "tier": tier, "bookings": total_bookings}
 
-def _execute_retention(lead_id):
+def _execute_retention(lead_id, processing_msg_id=None):
     """
     Triggers the retention sequence by firing the Zapier webhook.
-    Sends an initial 'processing' message and captures its message_id.
+    Expects the caller to have already sent/edited a 'processing' message
+    and to pass its message_id here so Zapier can edit it when complete.
     """
     lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
     lead_row  = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == lead_id), None)
@@ -1159,17 +1166,6 @@ def _execute_retention(lead_id):
 
     today_str = ph_now().strftime("%Y-%m-%d")
 
-    # Send initial processing message and capture message_id
-    initial_msg_text = f"⭐ *Processing Retention Sequence for `{lead_id}` ({client_name})...*\n_Please wait, this may take a moment._"
-    # Assuming send_pipeline_msg returns the response object from which message_id can be extracted
-    sent_message_response = smart_send(CHAT_ID, initial_msg_text, use_pipeline=True)
-    message_id = None
-    if sent_message_response and sent_message_response.status_code == 200:
-        try:
-            message_id = sent_message_response.json().get("result", {}).get("message_id")
-        except:
-            print(f"[RETENTION] Could not decode JSON from Telegram response")
-
     # Pipeline Tracker → Retention stage
     _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", lead_id, {
         "Current_Stage":    "Retention",
@@ -1178,10 +1174,10 @@ def _execute_retention(lead_id):
         "Next_Action_Date": today_str
     })
 
-    # Fire Zapier webhook (Everly & Co. — System 5 Review + Rebooking Sequence trigger) with message_id
+    # Fire Zapier webhook with processing_msg_id so retention_notify can edit the message in-place
     fired = fire_webhook(RETENTION_WEBHOOK, {
         "lead_id":      lead_id,
-        "message_id":   str(message_id) if message_id else None, # New parameter to pass to Zapier
+        "message_id":   str(processing_msg_id) if processing_msg_id else None,
         "project_id":   project_id,
         "client_name":  client_name,
         "client_email": client_email,
@@ -1199,7 +1195,7 @@ def _execute_retention(lead_id):
         "new_ltv":      new_ltv,
         "new_tier":     new_tier,
         "bookings":     bookings,
-        "message_id":   message_id # Return message_id for potential direct use if webhook fails
+        "message_id":   processing_msg_id
     }
 
 # ─────────────────────────────────────────────
@@ -1502,17 +1498,22 @@ def handle_callbacks(data, use_pipeline=False):
 
     # ── Retention execute — calls shared helper ──
     elif action == "trigger_retention":
-        # FIX 1: Remove buttons immediately by editing the message with empty keyboard
+        # Replace the confirm message in-place with a "Processing..." message.
+        # This same message_id is passed to Zapier so retention_notify edits it when done.
+        processing_text = (
+            f"⭐ *Processing Retention Sequence for `{target_id}`...*\n"
+            f"_Please wait, this may take a moment._"
+        )
         if use_pipeline:
-            edit_pipeline_msg(chat_id, msg_id, cb["message"]["text"], reply_markup=None)
+            edit_pipeline_msg(chat_id, msg_id, processing_text)
         else:
-            edit_msg(chat_id, msg_id, cb["message"]["text"], reply_markup=None)
-            
-        result = _execute_retention(target_id)
+            edit_msg(chat_id, msg_id, processing_text)
+
         answer_callback(cb["id"], "⭐ Retention sequence initiated.", use_pipeline)
+        result = _execute_retention(target_id, processing_msg_id=msg_id)
 
         if not result["fired"]:
-            smart_send(chat_id, "⚠️ Webhook failed — check RETENTION_WEBHOOK in Railway.", msg_id=msg_id, use_pipeline=use_pipeline)
+            smart_send(chat_id, "⚠️ Webhook failed — check RETENTION_WEBHOOK in Railway.", use_pipeline=use_pipeline)
 
     return jsonify({"status": "ok"})
 
@@ -1609,10 +1610,17 @@ def dashboard():
                 send_msg(chat_id, "Usage: `/retention <Lead_ID>`")
                 return jsonify({"status": "ok"})
             lead_id = parts[1]
-            result  = _execute_retention(lead_id)
-            if result["fired"]:
-                pass
-            else:
+            # Send the processing message first and capture its message_id
+            proc_text = f"⭐ *Processing Retention Sequence for `{lead_id}`...*\n_Please wait, this may take a moment._"
+            proc_resp = send_pipeline_msg(CHAT_ID, proc_text)
+            proc_msg_id = None
+            if proc_resp and proc_resp.status_code == 200:
+                try:
+                    proc_msg_id = proc_resp.json().get("result", {}).get("message_id")
+                except Exception:
+                    pass
+            result = _execute_retention(lead_id, processing_msg_id=proc_msg_id)
+            if not result["fired"]:
                 send_msg(chat_id, "⚠️ Webhook failed — check RETENTION_WEBHOOK in Railway.")
         elif text.startswith("/setbudget"):
             parts = text.split(maxsplit=2)
@@ -1940,10 +1948,17 @@ def retention_notify():
         f"🏁 *Status: Complete*"
     )
 
-    # Edit the existing message using smart_send to replace the "Processing..." message
-    # Edit the existing message using smart_send to replace the "Processing..." message
+    # Cast message_id to int (Telegram requires integer; Zapier passes it as string)
+    msg_id_int = None
     if message_id:
-        smart_send(CHAT_ID, text, msg_id=message_id, use_pipeline=True)
+        try:
+            msg_id_int = int(message_id)
+        except (ValueError, TypeError):
+            print(f"[RETENTION NOTIFY] Could not cast message_id to int: {message_id}")
+
+    # Edit the "Processing..." message in-place, or send a new one if message_id is unavailable
+    if msg_id_int:
+        smart_send(CHAT_ID, text, msg_id=msg_id_int, use_pipeline=True)
     else:
         smart_send(CHAT_ID, text, use_pipeline=True)
 
