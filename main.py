@@ -230,6 +230,27 @@ def send_pipeline_msg(chat_id, text, reply_markup=None):
     r = requests.post(f"{PIPELINE_API}/sendMessage", json=payload)
     return r # Return the response object to get message_id
 
+
+def delete_pipeline_msg(chat_id, message_id):
+    """Delete a message sent by the Pipeline Bot."""
+    try:
+        requests.post(f"{PIPELINE_API}/deleteMessage", json={
+            "chat_id": chat_id,
+            "message_id": message_id
+        }, timeout=5)
+    except Exception as e:
+        print(f"[DELETE MSG] Failed: {e}")
+
+def delete_msg(chat_id, message_id):
+    """Delete a message sent by the Dashboard Bot."""
+    try:
+        requests.post(f"{DASHBOARD_API}/deleteMessage", json={
+            "chat_id": chat_id,
+            "message_id": message_id
+        }, timeout=5)
+    except Exception as e:
+        print(f"[DELETE MSG] Failed: {e}")
+
 def send_client_msg(chat_id, text):
     requests.post(f"{CLIENT_API}/sendMessage", json={
         "chat_id": chat_id,
@@ -1091,52 +1112,71 @@ def _confirm_contract(chat_id, msg_id, lead_id, use_pipeline=False):
 
 def _update_client_stats(lead_id):
     """
-    Calculates LTV by summing all 'Budget' values for the client from the 'Leads' sheet
-    where the stage is not 'Closed Lost'.
+    Calculates LTV by summing Total_Value from the Projects sheet for all
+    projects belonging to this client (matched by email, or by lead_id fallback).
+    Uses Projects.Total_Value (the confirmed contract amount) rather than
+    Leads.Budget (just an estimate that is often TBD/empty).
     """
     lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T500")
-    
-    # Find the current lead's email or unique identifier to group by client
+
+    # Find the current lead to get the client email
     current_lead = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == lead_id), None)
     if not current_lead:
         return {"ltv": 0, "tier": "Standard", "bookings": 0}
-        
+
     client_email = safe_get(current_lead, lead_col, "Email")
-    
+
+    # Collect all Lead_IDs belonging to this client.
+    # Strategy: if email is available, match ALL leads sharing that email.
+    # If email is missing, fall back to only this specific lead_id.
+    client_lead_ids = set()
+    if client_email != "—":
+        for row in lead_rows:
+            email_val = safe_get(row, lead_col, "Email")
+            row_lead_id = safe_get(row, lead_col, "Lead_ID")
+            if row_lead_id == "—":
+                continue
+            if email_val != "—" and email_val.lower() == client_email.lower():
+                client_lead_ids.add(row_lead_id)
+    else:
+        # No email — only count this specific lead
+        client_lead_ids.add(lead_id)
+
+    # Always include the triggering lead_id in case it somehow missed the email loop
+    client_lead_ids.add(lead_id)
+
+    # Sum Total_Value from the Projects sheet for all matched Lead_IDs
+    proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
+
     total_ltv = 0
     total_bookings = 0
-    
-    for row in lead_rows:
-        email_val = safe_get(row, lead_col, "Email")
-        row_lead_id = safe_get(row, lead_col, "Lead_ID")
-        # Match by email (preferred) or by Lead_ID as fallback when email is missing
-        email_match = (email_val != "—" and client_email != "—" and
-                       email_val.lower() == client_email.lower())
-        id_match = (row_lead_id == lead_id)
-        if not (email_match or id_match):
+
+    for row in proj_rows:
+        row_lead_id = safe_get(row, proj_col, "Lead_ID")
+        if row_lead_id not in client_lead_ids:
             continue
-        status = safe_get(row, lead_col, "Lead_Status")
-        # Only count if not lost
-        if status != "Closed Lost":
-            total_bookings += 1  # Count every non-lost booking regardless of budget
-            budget_raw = safe_get(row, lead_col, "Budget")
-            budget_str = budget_raw.replace("$", "").replace(",", "").strip()
-            try:
-                # Filter out non-numeric budgets like "TBD"
-                if budget_str and (budget_str[0].isdigit() or (budget_str.startswith("-") and len(budget_str) > 1 and budget_str[1].isdigit())):
-                    budget_val = float(budget_str)
-                    total_ltv += budget_val
-            except ValueError:
-                pass
-    
-    # Determine Tier
+        stage = safe_get(row, proj_col, "Current_Stage")
+        if stage in ("Closed Lost",):
+            continue
+        total_bookings += 1
+        total_val_raw = safe_get(row, proj_col, "Total_Value")
+        total_val_str = total_val_raw.replace("$", "").replace(",", "").strip()
+        try:
+            if total_val_str and (total_val_str[0].isdigit() or
+                    (total_val_str.startswith("-") and len(total_val_str) > 1)):
+                total_ltv += float(total_val_str)
+        except ValueError:
+            pass
+
+    # Determine Tier based on LTV
     tier = "Standard"
     if total_ltv >= 5000:
         tier = "VIP"
     elif total_ltv >= 2500:
         tier = "Premium"
-        
+
     return {"ltv": int(total_ltv), "tier": tier, "bookings": total_bookings}
+
 
 def _execute_retention(lead_id, processing_msg_id=None):
     """
@@ -1498,19 +1538,27 @@ def handle_callbacks(data, use_pipeline=False):
 
     # ── Retention execute — calls shared helper ──
     elif action == "trigger_retention":
-        # Replace the confirm message in-place with a "Processing..." message.
-        # This same message_id is passed to Zapier so retention_notify edits it when done.
-        processing_text = (
+        # DELETE the confirm message entirely so System 4 context above it stays intact.
+        # Then send a FRESH "Processing..." message and track its message_id.
+        if use_pipeline:
+            delete_pipeline_msg(chat_id, msg_id)
+        else:
+            delete_msg(chat_id, msg_id)
+
+        proc_text = (
             f"⭐ *Processing Retention Sequence for `{target_id}`...*\n"
             f"_Please wait, this may take a moment._"
         )
-        if use_pipeline:
-            edit_pipeline_msg(chat_id, msg_id, processing_text)
-        else:
-            edit_msg(chat_id, msg_id, processing_text)
+        proc_resp = send_pipeline_msg(CHAT_ID, proc_text)
+        proc_msg_id = None
+        if proc_resp and proc_resp.status_code == 200:
+            try:
+                proc_msg_id = proc_resp.json().get("result", {}).get("message_id")
+            except Exception:
+                pass
 
         answer_callback(cb["id"], "⭐ Retention sequence initiated.", use_pipeline)
-        result = _execute_retention(target_id, processing_msg_id=msg_id)
+        result = _execute_retention(target_id, processing_msg_id=proc_msg_id)
 
         if not result["fired"]:
             smart_send(chat_id, "⚠️ Webhook failed — check RETENTION_WEBHOOK in Railway.", use_pipeline=use_pipeline)
@@ -1956,11 +2004,12 @@ def retention_notify():
         except (ValueError, TypeError):
             print(f"[RETENTION NOTIFY] Could not cast message_id to int: {message_id}")
 
-    # Edit the "Processing..." message in-place, or send a new one if message_id is unavailable
+    # DELETE the "Processing..." message so it disappears cleanly, then send the
+    # completion result as a fresh new message.
     if msg_id_int:
-        smart_send(CHAT_ID, text, msg_id=msg_id_int, use_pipeline=True)
-    else:
-        smart_send(CHAT_ID, text, use_pipeline=True)
+        delete_pipeline_msg(CHAT_ID, msg_id_int)
+    send_pipeline_msg(CHAT_ID, text)
+
 
     return jsonify({"status": "ok"})
 
