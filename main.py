@@ -1117,7 +1117,7 @@ def _update_client_stats(lead_id):
                 try:
                     # Filter out non-numeric budgets like "TBD"
                     if budget_str and (budget_str[0].isdigit() or (budget_str.startswith("-") and len(budget_str) > 1 and budget_str[1].isdigit())):
-                        budget_val = float(budget_str.replace("$", ""))
+                        budget_val = float(budget_str)
                         total_ltv += budget_val
                         total_bookings += 1
                 except ValueError:
@@ -1181,7 +1181,7 @@ def _execute_retention(lead_id):
     # Fire Zapier webhook (Everly & Co. — System 5 Review + Rebooking Sequence trigger) with message_id
     fired = fire_webhook(RETENTION_WEBHOOK, {
         "lead_id":      lead_id,
-        "message_id":   message_id, # New parameter to pass to Zapier
+        "message_id":   str(message_id) if message_id else None, # New parameter to pass to Zapier
         "project_id":   project_id,
         "client_name":  client_name,
         "client_email": client_email,
@@ -1941,7 +1941,11 @@ def retention_notify():
     )
 
     # Edit the existing message using smart_send to replace the "Processing..." message
-    smart_send(CHAT_ID, text, msg_id=message_id, use_pipeline=True)
+    # Edit the existing message using smart_send to replace the "Processing..." message
+    if message_id:
+        smart_send(CHAT_ID, text, msg_id=message_id, use_pipeline=True)
+    else:
+        smart_send(CHAT_ID, text, use_pipeline=True)
 
     return jsonify({"status": "ok"})
 
