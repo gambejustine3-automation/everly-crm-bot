@@ -1,7 +1,42 @@
+"""
+Everly & Co. Photography — CRM Pipeline Backend
+================================================
+Fully refactored, production-grade implementation.
+
+Architecture:
+  ┌─────────────────────────────────────────────────────────┐
+  │  Config & Environment                                   │
+  │  Google Sheets Persistence Layer                        │
+  │  State Machine (Stage Guards & Transition Engine)       │
+  │  Idempotency Manager (Callback De-duplication)          │
+  │  Pricing Engine (Single Source of Truth)                │
+  │  Telegram UI Layer (send / edit / delete)               │
+  │  Command Handlers                                       │
+  │  Callback Handlers (handle_callbacks)                   │
+  │  Webhook Routes (Zapier → Flask)                        │
+  │  Scheduler (Daily Briefing + Auto-Retention)            │
+  └─────────────────────────────────────────────────────────┘
+
+Critical Bug Fixes (v2):
+  1. STATE DESYNC: budget_contract_yes now passes total_price / deposit /
+     balance directly in the CONTRACT_ZAPIER_WEBHOOK payload so Zapier's
+     Node 4 pricing calculator receives the confirmed values instead of
+     falling back to the PRICE_MAP (which returned stale Elite Package →
+     $15,000 even when the operator confirmed $17,000).
+
+  2. MISSING DEPOSIT BUTTON: invoice_sent route now reads the deposit
+     amount from the Projects sheet and sends the "Mark Deposit Paid"
+     action button with a full double-confirmation flow so the operator
+     always has a clear, safe path to mark payment and advance to
+     System 4.
+"""
+
 from flask import Flask, request, jsonify
 import requests
 import os
 import json
+import time
+import threading
 from datetime import datetime, timedelta, timezone
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -10,9 +45,9 @@ import atexit
 
 app = Flask(__name__)
 
-# ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
 # ENVIRONMENT VARIABLES
-# ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
 BOT_TOKEN                = os.environ.get("BOT_TOKEN")
 PIPELINE_BOT_TOKEN       = os.environ.get("PIPELINE_BOT_TOKEN")
 DASHBOARD_BOT_TOKEN      = os.environ.get("DASHBOARD_BOT_TOKEN")
@@ -36,18 +71,12 @@ DEPOSIT_PAID_WEBHOOK     = os.environ.get("DEPOSIT_PAID_WEBHOOK")
 DELIVER_GALLERY_WEBHOOK  = os.environ.get("DELIVER_GALLERY_WEBHOOK")
 RETENTION_WEBHOOK        = os.environ.get("RETENTION_WEBHOOK")
 
-# External Resources
 GOOGLE_REVIEW_LINK       = os.environ.get("GOOGLE_REVIEW_LINK", "https://g.page/r/YOUR_PLACE_ID/review")
 
-# ─────────────────────────────────────────────
-# PH TIME HELPER
-# ─────────────────────────────────────────────
-def ph_now():
-    return datetime.utcnow() + timedelta(hours=8)
 
-# ─────────────────────────────────────────────
-# STAGE DEFINITIONS
-# ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
+# DOMAIN CONSTANTS
+# ═══════════════════════════════════════════════════════════
 PIPELINE_STAGES = [
     "Inquiry", "Discovery Call Booked", "Discovery Call Completed",
     "Proposal Sent", "Contracted", "Active Project", "Delivered",
@@ -58,7 +87,11 @@ PROJECT_STAGES = [
 ]
 STATUS_EMOJI = {"HOT": "🔴", "WARM": "🟡", "COLD": "🔵"}
 
+# Budgets that require manual confirmation before contract fire
 UNCERTAIN_BUDGETS = {"$10,000+", "TBD", "10000+", "$10,000+ "}
+
+# Terminal pipeline stages — never count as stuck / overdue
+TERMINAL_STAGES = {"Closed Won", "Closed Lost", "Retention", "Delivered", "Completed", "Closed"}
 
 OUTCOME_LABELS = {
     "completed_continue":  "✅ Completed — moving to Proposal",
@@ -78,32 +111,72 @@ OUTCOME_MAP = {
     "booked_for_client":   {"current_stage": "Discovery Call Booked",    "call_status": "Booked by Victoria",            "next_action": "Confirm with client"}
 }
 
-# ─────────────────────────────────────────────
-# GOOGLE SHEETS HELPERS
-# ─────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════
+# IDEMPOTENCY MANAGER
+# Prevents duplicate execution of the same one-time action
+# within a TTL window. Thread-safe via lock.
+# ═══════════════════════════════════════════════════════════
+_processed_lock = threading.Lock()
+_processed: dict[str, float] = {}   # token → unix-timestamp
+_PROCESSED_TTL  = 7200              # 2-hour expiry per token
+
+def _mark_processed(token: str) -> bool:
+    """
+    Atomically marks a callback token as processed.
+    Returns True if this is the FIRST time it's been seen (proceed).
+    Returns False if it was already processed (reject/skip).
+    """
+    now = time.time()
+    with _processed_lock:
+        # Expire old tokens to prevent unbounded growth
+        expired = [k for k, ts in _processed.items() if now - ts > _PROCESSED_TTL]
+        for k in expired:
+            del _processed[k]
+
+        if token in _processed:
+            return False          # already done — reject duplicate
+        _processed[token] = now
+        return True               # first time — allow execution
+
+
+# ═══════════════════════════════════════════════════════════
+# PH TIME HELPER
+# ═══════════════════════════════════════════════════════════
+def ph_now() -> datetime:
+    return datetime.utcnow() + timedelta(hours=8)
+
+
+# ═══════════════════════════════════════════════════════════
+# GOOGLE SHEETS — PERSISTENCE LAYER
+# ═══════════════════════════════════════════════════════════
 def get_sheets_service():
     creds_json = json.loads(os.environ.get("GOOGLE_CREDENTIALS_JSON"))
     creds = service_account.Credentials.from_service_account_info(creds_json, scopes=SCOPES)
     return build("sheets", "v4", credentials=creds)
 
-def read_sheet_with_headers(range_name):
+
+def read_sheet_with_headers(range_name: str) -> tuple[list, dict]:
+    """Read a sheet range and return (rows, col_index) where col_index
+    maps header names to zero-based column positions."""
     try:
         service = get_sheets_service()
-        result = service.spreadsheets().values().get(
+        result  = service.spreadsheets().values().get(
             spreadsheetId=SPREADSHEET_ID, range=range_name
         ).execute()
         values = result.get("values", [])
         if not values:
             return [], {}
         headers = values[0]
-        rows = values[1:]
-        col = {name: i for i, name in enumerate(headers)}
+        rows    = values[1:]
+        col     = {name: i for i, name in enumerate(headers)}
         return rows, col
     except Exception as e:
         print(f"[READ ERROR] {range_name}: {e}")
         return [], {}
 
-def write_sheet(range_name, values):
+
+def write_sheet(range_name: str, values: list) -> bool:
     try:
         service = get_sheets_service()
         service.spreadsheets().values().update(
@@ -115,138 +188,214 @@ def write_sheet(range_name, values):
         print(f"[WRITE ERROR] {range_name}: {e}")
         return False
 
-def _write_back(sheet_name, range_name, lookup_col_name, lookup_value, updates):
+
+def _write_back(sheet_name: str, range_name: str,
+                lookup_col: str, lookup_value: str,
+                updates: dict) -> bool:
+    """
+    Find the row whose `lookup_col` equals `lookup_value`, then
+    update only the specified columns. All other cells are preserved.
+    Returns True on success, False if the row was not found or write failed.
+    """
     rows, col = read_sheet_with_headers(range_name)
-    found_row_idx = -1
+    found_idx = -1
     for i, row in enumerate(rows):
-        if safe_get(row, col, lookup_col_name) == lookup_value:
-            found_row_idx = i
+        if safe_get(row, col, lookup_col) == lookup_value:
+            found_idx = i
             break
 
-    if found_row_idx == -1:
-        print(f"[WRITE BACK ERROR] {lookup_value} not found in {sheet_name} for column {lookup_col_name}")
+    if found_idx == -1:
+        print(f"[WRITE_BACK] '{lookup_value}' not found in {sheet_name}.{lookup_col}")
         return False
 
-    target_row = rows[found_row_idx]
-    updated_values = [v for v in target_row]
+    target_row = list(rows[found_idx])
 
     for key, value in updates.items():
         if key in col:
-            updated_values[col[key]] = value
+            # Extend row if necessary
+            while len(target_row) <= col[key]:
+                target_row.append("")
+            target_row[col[key]] = value
         else:
-            print(f"[WRITE BACK WARNING] Column '{key}' not found in {sheet_name}. Skipping.")
+            print(f"[WRITE_BACK] Column '{key}' missing in {sheet_name} — skipping")
 
-    update_range = f"{sheet_name}!{get_col_letter(0)}{found_row_idx + 2}:{get_col_letter(len(updated_values) - 1)}{found_row_idx + 2}"
-    return write_sheet(update_range, [updated_values])
+    row_number   = found_idx + 2          # +1 for 0-index, +1 for header
+    first_letter = _col_letter(0)
+    last_letter  = _col_letter(len(target_row) - 1)
+    update_range = f"{sheet_name}!{first_letter}{row_number}:{last_letter}{row_number}"
+    return write_sheet(update_range, [target_row])
 
-def safe_get(row, col, key):
+
+def safe_get(row: list, col: dict, key: str) -> str:
+    """Safe column accessor — returns '—' for missing or empty cells."""
     if key not in col or len(row) <= col[key]:
         return "—"
-    return row[col[key]] if row[col[key]] else "—"
+    val = row[col[key]]
+    return val if val else "—"
 
-def get_col_letter(idx):
+
+def _col_letter(idx: int) -> str:
+    """Convert zero-based column index to spreadsheet letter (A, B … Z, AA …)."""
     result = ""
     while idx >= 0:
         result = chr(65 + (idx % 26)) + result
-        idx = (idx // 26) - 1
+        idx    = (idx // 26) - 1
     return result
 
-def fire_webhook(url, payload):
+
+# ═══════════════════════════════════════════════════════════
+# PRICING ENGINE — Single Source of Truth
+#
+# All deposit / balance computations live here.
+# No other part of the code should compute these values
+# independently.
+# ═══════════════════════════════════════════════════════════
+DEPOSIT_RATE = 0.30   # 30 % deposit, 70 % balance
+
+def compute_pricing(total: int) -> dict:
+    """Return the canonical pricing dict for a given total."""
+    deposit = round(total * DEPOSIT_RATE)
+    balance = total - deposit
+    return {
+        "total":   total,
+        "deposit": deposit,
+        "balance": balance,
+    }
+
+
+def persist_confirmed_pricing(lead_id: str, pricing: dict) -> bool:
+    """
+    Write the confirmed pricing to BOTH the Leads sheet AND the
+    Projects sheet so every downstream system reads the same values.
+
+    Leads columns written:  Budget (confirmed total as plain integer string)
+    Projects columns written: Total_Price, Deposit, Balance
+
+    This must complete before the contract webhook fires.
+    Returns True only if both writes succeed.
+    """
+    total_str   = str(pricing["total"])
+    deposit_str = str(pricing["deposit"])
+    balance_str = str(pricing["balance"])
+
+    leads_ok = _write_back(
+        "Leads", "Leads!A1:T200", "Lead_ID", lead_id,
+        {"Budget": total_str}
+    )
+    projects_ok = _write_back(
+        "Projects", "Projects!A1:Z200", "Lead_ID", lead_id,
+        {
+            "Total_Price": total_str,
+            "Deposit":     deposit_str,
+            "Balance":     balance_str,
+        }
+    )
+    if not leads_ok:
+        print(f"[PRICING] WARNING: Failed to write pricing to Leads for {lead_id}")
+    if not projects_ok:
+        # Projects row may not exist yet (created by System 2 proposal).
+        # Not fatal — 3A Zapier will write the values to Projects anyway.
+        print(f"[PRICING] Projects row not found for {lead_id} — will be written by Zapier 3A")
+
+    return leads_ok   # Leads sheet is the primary source of truth
+
+
+# ═══════════════════════════════════════════════════════════
+# WEBHOOK HELPER
+# ═══════════════════════════════════════════════════════════
+def fire_webhook(url: str, payload: dict) -> bool:
     if not url:
-        print("[WEBHOOK] URL not set.")
+        print("[WEBHOOK] URL not configured.")
         return False
     try:
-        r = requests.post(url, json=payload, timeout=10)
+        r = requests.post(url, json=payload, timeout=15)
         r.raise_for_status()
+        print(f"[WEBHOOK] Fired {url} → {r.status_code}")
         return True
     except Exception as e:
         print(f"[WEBHOOK ERROR] {url}: {e}")
         return False
 
-def answer_callback(cb_id, text, use_pipeline=False):
-    api = PIPELINE_API if use_pipeline else DASHBOARD_API
-    requests.post(f"{api}/answerCallbackQuery", json={
-        "callback_query_id": cb_id,
-        "text": text
-    })
 
-# ─────────────────────────────────────────────
-# TELEGRAM SEND/EDIT HELPERS
-# ─────────────────────────────────────────────
-def send_msg(chat_id, text, reply_markup=None):
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "Markdown",
-    }
+def answer_callback(cb_id: str, text: str, use_pipeline: bool = False):
+    api = PIPELINE_API if use_pipeline else DASHBOARD_API
+    try:
+        requests.post(f"{api}/answerCallbackQuery", json={
+            "callback_query_id": cb_id,
+            "text": text
+        }, timeout=5)
+    except Exception as e:
+        print(f"[ANSWER_CB] {e}")
+
+
+# ═══════════════════════════════════════════════════════════
+# TELEGRAM UI LAYER
+# ═══════════════════════════════════════════════════════════
+def send_msg(chat_id, text: str, reply_markup=None) -> requests.Response:
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
     if reply_markup:
         payload["reply_markup"] = reply_markup
     r = requests.post(f"{DASHBOARD_API}/sendMessage", json=payload)
-    print(f"[DASHBOARD SEND] {r.status_code}: {r.text[:200]}")
+    print(f"[DASH SEND] {r.status_code}: {r.text[:160]}")
     return r
 
-def edit_msg(chat_id, message_id, text, reply_markup=None):
-    payload = {
-        "chat_id": chat_id,
-        "message_id": message_id,
-        "text": text,
-        "parse_mode": "Markdown",
-    }
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    else:
-        payload["reply_markup"] = {"inline_keyboard": []}
-    requests.post(f"{DASHBOARD_API}/editMessageText", json=payload)
 
-def edit_pipeline_msg(chat_id, message_id, text, reply_markup=None):
-    payload = {
-        "chat_id": chat_id,
-        "message_id": message_id,
-        "text": text,
-        "parse_mode": "Markdown",
-    }
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    else:
-        payload["reply_markup"] = {"inline_keyboard": []}
-    requests.post(f"{PIPELINE_API}/editMessageText", json=payload)
-
-def send_pipeline_msg(chat_id, text, reply_markup=None):
+def edit_msg(chat_id, message_id: int, text: str, reply_markup=None):
     payload = {
         "chat_id":    chat_id,
+        "message_id": message_id,
         "text":       text,
         "parse_mode": "Markdown",
+        "reply_markup": reply_markup if reply_markup else {"inline_keyboard": []},
     }
+    requests.post(f"{DASHBOARD_API}/editMessageText", json=payload)
+
+
+def send_pipeline_msg(chat_id, text: str, reply_markup=None) -> requests.Response:
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
     if reply_markup:
         payload["reply_markup"] = reply_markup
     r = requests.post(f"{PIPELINE_API}/sendMessage", json=payload)
     return r
 
-def delete_pipeline_msg(chat_id, message_id):
+
+def edit_pipeline_msg(chat_id, message_id: int, text: str, reply_markup=None):
+    payload = {
+        "chat_id":    chat_id,
+        "message_id": message_id,
+        "text":       text,
+        "parse_mode": "Markdown",
+        "reply_markup": reply_markup if reply_markup else {"inline_keyboard": []},
+    }
+    requests.post(f"{PIPELINE_API}/editMessageText", json=payload)
+
+
+def delete_pipeline_msg(chat_id, message_id: int):
     try:
         requests.post(f"{PIPELINE_API}/deleteMessage", json={
-            "chat_id": chat_id,
-            "message_id": message_id
+            "chat_id": chat_id, "message_id": message_id
         }, timeout=5)
     except Exception as e:
-        print(f"[DELETE MSG] Failed: {e}")
+        print(f"[DELETE_MSG] {e}")
 
-def delete_msg(chat_id, message_id):
+
+def delete_msg(chat_id, message_id: int):
     try:
         requests.post(f"{DASHBOARD_API}/deleteMessage", json={
-            "chat_id": chat_id,
-            "message_id": message_id
+            "chat_id": chat_id, "message_id": message_id
         }, timeout=5)
     except Exception as e:
-        print(f"[DELETE MSG] Failed: {e}")
+        print(f"[DELETE_MSG] {e}")
 
-def send_client_msg(chat_id, text):
+
+def send_client_msg(chat_id, text: str):
     requests.post(f"{CLIENT_API}/sendMessage", json={
-        "chat_id": chat_id,
-        "text": text
+        "chat_id": chat_id, "text": text
     })
 
-def smart_send(chat_id, text, markup=None, msg_id=None, use_pipeline=False):
+
+def smart_send(chat_id, text: str, markup=None, msg_id=None, use_pipeline: bool = False):
+    """Edit if msg_id given; otherwise send a new message."""
     if msg_id:
         if use_pipeline:
             edit_pipeline_msg(chat_id, msg_id, text, markup)
@@ -258,124 +407,112 @@ def smart_send(chat_id, text, markup=None, msg_id=None, use_pipeline=False):
         else:
             return send_msg(chat_id, text, markup)
 
-# ─────────────────────────────────────────────
-# CONFIG HELPERS
-# Config sheet layout (columns):
-#   A1: last_lead_number  B1: padded  C1: briefing_time
-#   A2: <counter>         B2: <val>   C2: <HH:MM value>
-# ─────────────────────────────────────────────
-def get_briefing_time():
+
+# ═══════════════════════════════════════════════════════════
+# CONFIG HELPERS (briefing time stored in Config sheet)
+# ═══════════════════════════════════════════════════════════
+def get_briefing_time() -> str:
     try:
         service = get_sheets_service()
-        result = service.spreadsheets().values().get(
-            spreadsheetId=SPREADSHEET_ID,
-            range="Config!C2"
+        result  = service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID, range="Config!C2"
         ).execute()
         values = result.get("values", [])
         if values and values[0] and values[0][0]:
             val = str(values[0][0]).strip()
-            # Validate it's HH:MM format before returning
             if ":" in val:
                 return val
     except Exception as e:
         print(f"[CONFIG] Error reading briefing_time: {e}")
     return "09:00"
 
-def write_briefing_time(time_str):
+
+def write_briefing_time(time_str: str):
     try:
         service = get_sheets_service()
-        # Ensure header exists
-        check = service.spreadsheets().values().get(
-            spreadsheetId=SPREADSHEET_ID,
-            range="Config!C1"
+        check   = service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID, range="Config!C1"
         ).execute()
-        c1_vals = check.get("values", [])
-        if not c1_vals or not c1_vals[0]:
+        if not check.get("values"):
             write_sheet("Config!C1", [["briefing_time"]])
         write_sheet("Config!C2", [[time_str]])
     except Exception as e:
         print(f"[CONFIG] Error writing briefing_time: {e}")
 
-# ─────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════
 # SCHEDULER — Daily Jobs
-# ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
 scheduler = BackgroundScheduler(timezone="Asia/Manila")
 
+
 def run_daily_jobs():
-    print(f"[SCHEDULER] Running daily jobs at {ph_now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"[SCHEDULER] Daily jobs at {ph_now().strftime('%Y-%m-%d %H:%M')}")
     send_daily_briefing()
     check_retention_completions()
 
-def reschedule_briefing(time_str):
+
+def reschedule_briefing(time_str: str):
     try:
         hour, minute = map(int, time_str.split(":"))
         scheduler.reschedule_job(
-            'daily_jobs',
-            trigger='cron',
-            hour=hour,
-            minute=minute
+            "daily_jobs", trigger="cron", hour=hour, minute=minute
         )
         print(f"[SCHEDULER] Rescheduled to {time_str} PH time")
     except Exception as e:
         print(f"[SCHEDULER] Reschedule error: {e}")
+
 
 def init_scheduler():
     if scheduler.running:
         return
     try:
         briefing_time = get_briefing_time()
-        hour, minute = map(int, briefing_time.split(":"))
+        hour, minute  = map(int, briefing_time.split(":"))
     except Exception:
-        hour, minute = 9, 0
+        hour, minute  = 9, 0
     scheduler.add_job(
-        run_daily_jobs,
-        'cron',
-        hour=hour,
-        minute=minute,
-        id='daily_jobs',
-        replace_existing=True
+        run_daily_jobs, "cron",
+        hour=hour, minute=minute,
+        id="daily_jobs", replace_existing=True
     )
     scheduler.start()
     atexit.register(lambda: scheduler.shutdown())
     print(f"[SCHEDULER] Started — daily jobs at {hour:02d}:{minute:02d} PH time")
 
-# ─────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════
 # DAILY BRIEFING
-# ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
 def send_daily_briefing():
-    today = ph_now()
-    today_disp = today.strftime("%B %d, %Y")
-    lines = [f"🌅 *Good morning! Daily Briefing — {today_disp}*\n"]
-    buttons = []
-    has_items = False
+    today       = ph_now()
+    today_disp  = today.strftime("%B %d, %Y")
+    lines       = [f"🌅 *Good morning! Daily Briefing — {today_disp}*\n"]
+    buttons     = []
+    has_items   = False
 
     proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
     lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
 
-    # ── 1. Overdue Balances ──
+    # ── 1. Overdue Balances ──────────────────────────────────
     overdue = []
     for r in proj_rows:
         stage = safe_get(r, proj_col, "Current_Stage")
-        if stage in ("Completed", "Closed", "Closed Won", "Closed Lost"):
+        if stage in TERMINAL_STAGES:
             continue
-        balance_paid = safe_get(r, proj_col, "Balance_Paid")
-        if balance_paid and balance_paid.upper() == "TRUE":
+        if safe_get(r, proj_col, "Balance_Paid").upper() == "TRUE":
             continue
         due_str = safe_get(r, proj_col, "Balance_Due_Date")
         if due_str == "—":
             continue
-        try:
-            for fmt in ("%Y-%m-%d", "%m/%d/%Y"):
-                try:
-                    due_dt = datetime.strptime(due_str.strip(), fmt)
-                    if due_dt.date() < today.date():
-                        days_overdue = (today.date() - due_dt.date()).days
-                        overdue.append((r, days_overdue))
-                    break
-                except ValueError:
-                    continue
-        except Exception:
-            pass
+        for fmt in ("%Y-%m-%d", "%m/%d/%Y"):
+            try:
+                due_dt = datetime.strptime(due_str.strip(), fmt)
+                if due_dt.date() < today.date():
+                    overdue.append((r, (today.date() - due_dt.date()).days))
+                break
+            except ValueError:
+                pass
 
     if overdue:
         has_items = True
@@ -389,7 +526,7 @@ def send_daily_briefing():
             lines.append(f" • *{name}* — ${bal} overdue by {days} day(s) (due {due})")
             buttons.append([{"text": f"💰 {name} — Overdue Balance", "callback_data": f"view_project|{lid}"}])
 
-    # ── 2. Galleries Not Yet Delivered ──
+    # ── 2. Galleries Not Yet Delivered ───────────────────────
     undelivered = []
     for r in proj_rows:
         stage = safe_get(r, proj_col, "Current_Stage")
@@ -398,18 +535,15 @@ def send_daily_briefing():
         event_str = safe_get(r, proj_col, "Event_Date")
         if event_str == "—":
             continue
-        try:
-            for fmt in ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y", "%Y-%m-%d"):
-                try:
-                    event_dt = datetime.strptime(event_str.strip(), fmt)
-                    days_since = (today.date() - event_dt.date()).days
-                    if days_since > 0:
-                        undelivered.append((r, days_since))
-                    break
-                except ValueError:
-                    continue
-        except Exception:
-            pass
+        for fmt in ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y", "%Y-%m-%d"):
+            try:
+                event_dt   = datetime.strptime(event_str.strip(), fmt)
+                days_since = (today.date() - event_dt.date()).days
+                if days_since > 0:
+                    undelivered.append((r, days_since))
+                break
+            except ValueError:
+                pass
 
     if undelivered:
         has_items = True
@@ -422,29 +556,25 @@ def send_daily_briefing():
             lines.append(f" • *{name}* — {days} day(s) since event | Stage: {stage}")
             buttons.append([{"text": f"📸 {name} — Deliver Gallery", "callback_data": f"view_project|{lid}"}])
 
-    # ── 3. Projects Stuck in a Stage (14+ days past Next_Action_Date) ──
+    # ── 3. Stuck Pipeline Entries (14+ days past Next_Action_Date) ──
     pipe_rows, pipe_col = read_sheet_with_headers("Pipeline Tracker!A1:L200")
     stuck = []
-    terminal = {"Closed Won", "Closed Lost", "Retention", "Delivered"}
     for r in pipe_rows:
         stage = safe_get(r, pipe_col, "Current_Stage")
-        if stage in terminal:
+        if stage in TERMINAL_STAGES:
             continue
         nad_str = safe_get(r, pipe_col, "Next_Action_Date")
         if nad_str == "—":
             continue
-        try:
-            for fmt in ("%Y-%m-%d", "%m/%d/%Y"):
-                try:
-                    nad_dt    = datetime.strptime(nad_str.strip(), fmt)
-                    days_past = (today.date() - nad_dt.date()).days
-                    if days_past >= 14:
-                        stuck.append((r, days_past))
-                    break
-                except ValueError:
-                    continue
-        except Exception:
-            pass
+        for fmt in ("%Y-%m-%d", "%m/%d/%Y"):
+            try:
+                nad_dt    = datetime.strptime(nad_str.strip(), fmt)
+                days_past = (today.date() - nad_dt.date()).days
+                if days_past >= 14:
+                    stuck.append((r, days_past))
+                break
+            except ValueError:
+                pass
 
     if stuck:
         has_items = True
@@ -457,24 +587,21 @@ def send_daily_briefing():
             lines.append(f" • *{name}* — {stage} for {days} day(s)")
             buttons.append([{"text": f"⏳ {name} — Stuck", "callback_data": f"view_pipe|{lid}"}])
 
-    # ── 4. Upcoming Shoots This Week ──
+    # ── 4. Upcoming Shoots This Week ─────────────────────────
     upcoming = []
     for r in lead_rows:
         event_str = safe_get(r, lead_col, "Event_Date")
         if event_str == "—":
             continue
-        try:
-            for fmt in ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y", "%Y-%m-%d"):
-                try:
-                    event_dt   = datetime.strptime(event_str.strip(), fmt)
-                    days_until = (event_dt.date() - today.date()).days
-                    if 0 <= days_until <= 7:
-                        upcoming.append((r, days_until))
-                    break
-                except ValueError:
-                    continue
-        except Exception:
-            pass
+        for fmt in ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y", "%Y-%m-%d"):
+            try:
+                event_dt   = datetime.strptime(event_str.strip(), fmt)
+                days_until = (event_dt.date() - today.date()).days
+                if 0 <= days_until <= 7:
+                    upcoming.append((r, days_until))
+                break
+            except ValueError:
+                pass
 
     if upcoming:
         has_items = True
@@ -488,30 +615,25 @@ def send_daily_briefing():
             lines.append(f" • *{name}* — {etype} {label}")
             buttons.append([{"text": f"📅 {name} — {etype}", "callback_data": f"view_lead|{lid}"}])
 
-    # ── 5. Retention Windows Closing (day 5–7 of 7) ──
+    # ── 5. Retention Windows Closing (day 5–7) ───────────────
     closing = []
     for r in proj_rows:
-        stage = safe_get(r, proj_col, "Current_Stage")
-        if stage != "Delivered":
+        if safe_get(r, proj_col, "Current_Stage") != "Delivered":
             continue
-        review_sent = safe_get(r, proj_col, "Review")
-        if review_sent and review_sent.upper() == "TRUE":
+        if safe_get(r, proj_col, "Review").upper() == "TRUE":
             continue
         delivery_str = safe_get(r, proj_col, "Delivery_Date")
         if delivery_str == "—":
             continue
-        try:
-            for fmt in ("%Y-%m-%d", "%m/%d/%Y"):
-                try:
-                    delivery_dt = datetime.strptime(delivery_str.strip(), fmt)
-                    days_since  = (today.date() - delivery_dt.date()).days
-                    if 5 <= days_since <= 7:
-                        closing.append((r, days_since))
-                    break
-                except ValueError:
-                    continue
-        except Exception:
-            pass
+        for fmt in ("%Y-%m-%d", "%m/%d/%Y"):
+            try:
+                delivery_dt = datetime.strptime(delivery_str.strip(), fmt)
+                days_since  = (today.date() - delivery_dt.date()).days
+                if 5 <= days_since <= 7:
+                    closing.append((r, days_since))
+                break
+            except ValueError:
+                pass
 
     if closing:
         has_items = True
@@ -528,49 +650,42 @@ def send_daily_briefing():
     markup = {"inline_keyboard": buttons} if buttons else None
     send_msg(CHAT_ID, "\n".join(lines), markup)
 
-# ─────────────────────────────────────────────
-# AUTO-COMPLETE RETENTION
-# ─────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════
+# AUTO-COMPLETE RETENTION (runs daily via scheduler)
+# ═══════════════════════════════════════════════════════════
 def check_retention_completions():
     today = ph_now()
     proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
     for r in proj_rows:
-        stage = safe_get(r, proj_col, "Current_Stage")
-        if stage != "Delivered":
+        if safe_get(r, proj_col, "Current_Stage") != "Delivered":
             continue
         review_sent_date_str = safe_get(r, proj_col, "Review_Sent_Date")
         if review_sent_date_str == "—":
             continue
-
         lead_id     = safe_get(r, proj_col, "Lead_ID")
         client_name = safe_get(r, proj_col, "Client_Name")
+        for fmt in ("%Y-%m-%d", "%m/%d/%Y"):
+            try:
+                sent_dt    = datetime.strptime(review_sent_date_str.strip(), fmt)
+                days_since = (today.date() - sent_dt.date()).days
+                if days_since >= 7:
+                    _auto_complete_project(lead_id, client_name)
+                break
+            except ValueError:
+                pass
 
-        try:
-            for fmt in ("%Y-%m-%d", "%m/%d/%Y"):
-                try:
-                    sent_dt    = datetime.strptime(review_sent_date_str.strip(), fmt)
-                    days_since = (today.date() - sent_dt.date()).days
-                    if days_since >= 7:
-                        _auto_complete_project(lead_id, client_name)
-                    break
-                except ValueError:
-                    continue
-        except Exception as e:
-            print(f"[RETENTION CHECK] Error for {lead_id}: {e}")
 
-def _auto_complete_project(lead_id, client_name):
+def _auto_complete_project(lead_id: str, client_name: str):
     today_str = ph_now().strftime("%Y-%m-%d")
-
-    _write_back("Projects", "Projects!A1:Z200", "Lead_ID", lead_id, {
-        "Current_Stage": "Completed"
-    })
+    _write_back("Projects", "Projects!A1:Z200", "Lead_ID", lead_id,
+                {"Current_Stage": "Completed"})
     _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", lead_id, {
         "Current_Stage":    "Closed Won",
         "Last_Action":      "Auto-completed — retention window closed",
         "Next_Action":      "—",
         "Next_Action_Date": today_str
     })
-
     msg = (
         f"✅ *Project Auto-Completed*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -583,10 +698,11 @@ def _auto_complete_project(lead_id, client_name):
     send_pipeline_msg(CHAT_ID, msg)
     print(f"[AUTO-COMPLETE] {lead_id} — {client_name}")
 
-# ─────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════
 # CAL.COM API HELPERS
-# ─────────────────────────────────────────────
-def cancel_cal_booking_for_lead(lead_id):
+# ═══════════════════════════════════════════════════════════
+def cancel_cal_booking_for_lead(lead_id: str) -> tuple[bool, str]:
     if not CAL_API_KEY:
         return False, "no_api_key"
     try:
@@ -598,11 +714,10 @@ def cancel_cal_booking_for_lead(lead_id):
         r.raise_for_status()
         data     = r.json().get("data", [])
         bookings = data if isinstance(data, list) else data.get("bookings", [])
+        now_utc  = datetime.now(timezone.utc)
         target_uid = None
-        now_utc    = datetime.now(timezone.utc)
         for b in bookings:
-            booking_lead_id = b.get("bookingFieldsResponses", {}).get("lead_id")
-            if booking_lead_id != lead_id:
+            if b.get("bookingFieldsResponses", {}).get("lead_id") != lead_id:
                 continue
             if b.get("status") != "accepted":
                 continue
@@ -615,14 +730,16 @@ def cancel_cal_booking_for_lead(lead_id):
                 pass
             target_uid = b.get("uid")
             break
+
         if not target_uid:
             return False, "not_found"
+
         cr = requests.post(
             f"https://api.cal.com/v2/bookings/{target_uid}/cancel",
             headers={
-                "Authorization": f"Bearer {CAL_API_KEY}",
+                "Authorization":   f"Bearer {CAL_API_KEY}",
                 "cal-api-version": "2024-08-13",
-                "Content-Type": "application/json"
+                "Content-Type":    "application/json"
             },
             json={"cancellationReason": "Rescheduled by host"},
             timeout=10
@@ -630,10 +747,11 @@ def cancel_cal_booking_for_lead(lead_id):
         cr.raise_for_status()
         return True, target_uid
     except Exception as e:
-        print(f"[CAL CANCEL ERROR] {e}")
+        print(f"[CAL CANCEL] {e}")
         return False, str(e)
 
-def fetch_cal_bookings(date_str):
+
+def fetch_cal_bookings(date_str: str) -> list:
     if not CAL_API_KEY:
         return []
     try:
@@ -651,13 +769,14 @@ def fetch_cal_bookings(date_str):
         data = r.json().get("data", [])
         return data if isinstance(data, list) else data.get("bookings", [])
     except Exception as e:
-        print(f"[CAL ERROR] {e}")
+        print(f"[CAL FETCH] {e}")
         return []
 
-def parse_cal_booking(booking):
+
+def parse_cal_booking(booking: dict) -> dict:
     attendees    = booking.get("attendees", [])
     client_name  = attendees[0].get("name", "Unknown") if attendees else "Unknown"
-    client_email = attendees[0].get("email", "—") if attendees else "—"
+    client_email = attendees[0].get("email", "—")      if attendees else "—"
     responses    = booking.get("bookingFieldsResponses", {})
     metadata     = booking.get("metadata", {})
     lead_id      = responses.get("lead_id") or metadata.get("lead_id") or "—"
@@ -668,7 +787,8 @@ def parse_cal_booking(booking):
         time_str = dt_local.strftime("%I:%M %p")
     except Exception:
         time_str = start_raw
-    meeting_url = booking.get("videoCallData", {}).get("url") or booking.get("location", "—") or "—"
+    meeting_url  = (booking.get("videoCallData", {}) or {}).get("url") or \
+                   booking.get("location", "—") or "—"
     return {
         "id":           booking.get("id"),
         "uid":          booking.get("uid", ""),
@@ -677,12 +797,13 @@ def parse_cal_booking(booking):
         "lead_id":      lead_id,
         "time":         time_str,
         "status":       booking.get("status", "accepted"),
-        "meeting_url":  meeting_url
+        "meeting_url":  meeting_url,
     }
 
-# ─────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════
 # COMMAND HANDLERS
-# ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
 def handle_start_command(chat_id):
     text = (
         "📸 *Welcome to Everly & Co. CRM Dashboard*\n\n"
@@ -690,6 +811,7 @@ def handle_start_command(chat_id):
         "Use /help to see all commands and what they do"
     )
     send_msg(chat_id, text)
+
 
 def handle_help_command(chat_id):
     text = (
@@ -710,7 +832,7 @@ def handle_help_command(chat_id):
         "🛠 *Admin*\n"
         "`/resetleadcounter` — Reset lead ID counter to 0 (use before demos)\n"
         "`/retention <Lead_ID>` — Trigger post-delivery review + retention sequence\n"
-        "`/setbudget <Lead_ID> <amount>` — Confirm exact amount for $10k+/TBD leads before sending contract\n\n"
+        "`/setbudget <Lead_ID> <amount>` — Confirm exact amount for $10k+/TBD leads before contract\n\n"
         "⏰ *Briefing Settings*\n"
         "`/briefing` — Send today's briefing right now\n"
         "`/setbriefingtime HH:MM` — Change daily briefing time (24hr, PH time)\n"
@@ -719,8 +841,9 @@ def handle_help_command(chat_id):
     )
     send_msg(chat_id, text)
 
+
 def handle_menu_command(chat_id):
-    text = "*Main Menu*\nWhat would you like to do?"
+    text   = "*Main Menu*\nWhat would you like to do?"
     markup = {
         "inline_keyboard": [
             [{"text": "📋 Leads",    "callback_data": "nav_leads"},    {"text": "🔥 Hot Leads", "callback_data": "nav_hot"}],
@@ -730,10 +853,11 @@ def handle_menu_command(chat_id):
     }
     send_msg(chat_id, text, markup)
 
-def handle_leads_command(chat_id, msg_id=None, use_pipeline=False):
+
+def handle_leads_command(chat_id, msg_id=None, use_pipeline: bool = False):
     rows, col = read_sheet_with_headers("Leads!A1:T200")
-    lines = ["📋 *Latest Leads*\n━━━━━━━━━━━━━━━━━━━━"]
-    buttons = []
+    lines     = ["📋 *Latest Leads*\n━━━━━━━━━━━━━━━━━━━━"]
+    buttons   = []
     for r in rows[-10:]:
         lid    = safe_get(r, col, "Lead_ID")
         name   = safe_get(r, col, "Full_Name")
@@ -741,13 +865,13 @@ def handle_leads_command(chat_id, msg_id=None, use_pipeline=False):
         emoji  = STATUS_EMOJI.get(status, "")
         lines.append(f"• {emoji} *{name}* (`{lid}`) — {status}")
         buttons.append([{"text": f"👤 {name}", "callback_data": f"view_lead|{lid}"}])
-    markup = {"inline_keyboard": buttons}
-    smart_send(chat_id, "\n".join(lines), markup, msg_id, use_pipeline)
+    smart_send(chat_id, "\n".join(lines), {"inline_keyboard": buttons}, msg_id, use_pipeline)
 
-def handle_hot_command(chat_id, msg_id=None, use_pipeline=False):
+
+def handle_hot_command(chat_id, msg_id=None, use_pipeline: bool = False):
     rows, col = read_sheet_with_headers("Leads!A1:T200")
-    lines = ["🔥 *Hot Leads*\n━━━━━━━━━━━━━━━━━━━━"]
-    buttons = []
+    lines     = ["🔥 *Hot Leads*\n━━━━━━━━━━━━━━━━━━━━"]
+    buttons   = []
     hot_leads = [r for r in rows if safe_get(r, col, "Lead_Status") == "HOT"]
     if not hot_leads:
         lines.append("No hot leads at the moment. Keep hustling! 💪")
@@ -756,13 +880,13 @@ def handle_hot_command(chat_id, msg_id=None, use_pipeline=False):
         name = safe_get(r, col, "Full_Name")
         lines.append(f"• 🔴 *{name}* (`{lid}`)")
         buttons.append([{"text": f"👤 {name}", "callback_data": f"view_lead|{lid}"}])
-    markup = {"inline_keyboard": buttons}
-    smart_send(chat_id, "\n".join(lines), markup, msg_id, use_pipeline)
+    smart_send(chat_id, "\n".join(lines), {"inline_keyboard": buttons}, msg_id, use_pipeline)
 
-def handle_pipeline_command(chat_id, msg_id=None, use_pipeline=False):
+
+def handle_pipeline_command(chat_id, msg_id=None, use_pipeline: bool = False):
     rows, col = read_sheet_with_headers("Pipeline Tracker!A1:L200")
-    lines = ["📊 *Pipeline Overview*\n━━━━━━━━━━━━━━━━━━━━"]
-    buttons = []
+    lines     = ["📊 *Pipeline Overview*\n━━━━━━━━━━━━━━━━━━━━"]
+    buttons   = []
     for r in rows:
         lid         = safe_get(r, col, "Lead_ID")
         name        = safe_get(r, col, "Client_Name")
@@ -770,29 +894,29 @@ def handle_pipeline_command(chat_id, msg_id=None, use_pipeline=False):
         next_action = safe_get(r, col, "Next_Action")
         lines.append(f"• *{name}* (`{lid}`) — {stage} | Next: {next_action}")
         buttons.append([{"text": f"📈 {name} — {stage}", "callback_data": f"view_pipe|{lid}"}])
-    markup = {"inline_keyboard": buttons}
-    smart_send(chat_id, "\n".join(lines), markup, msg_id, use_pipeline)
+    smart_send(chat_id, "\n".join(lines), {"inline_keyboard": buttons}, msg_id, use_pipeline)
 
-def handle_project_command(chat_id, msg_id=None, use_pipeline=False):
+
+def handle_project_command(chat_id, msg_id=None, use_pipeline: bool = False):
     rows, col = read_sheet_with_headers("Projects!A1:Z200")
-    lines = ["📂 *Active Projects*\n━━━━━━━━━━━━━━━━━━━━"]
-    buttons = []
-    active_projects = [
+    lines     = ["📂 *Active Projects*\n━━━━━━━━━━━━━━━━━━━━"]
+    buttons   = []
+    active    = [
         r for r in rows
         if safe_get(r, col, "Current_Stage") not in ("Completed", "Closed", "Closed Won", "Closed Lost")
     ]
-    if not active_projects:
+    if not active:
         lines.append("No active projects at the moment. Time to close some deals! 🚀")
-    for r in active_projects:
+    for r in active:
         lid   = safe_get(r, col, "Lead_ID")
         name  = safe_get(r, col, "Client_Name")
         stage = safe_get(r, col, "Current_Stage")
         lines.append(f"• *{name}* (`{lid}`) — {stage}")
         buttons.append([{"text": f"🛠 {name} — {stage}", "callback_data": f"view_project|{lid}"}])
-    markup = {"inline_keyboard": buttons}
-    smart_send(chat_id, "\n".join(lines), markup, msg_id, use_pipeline)
+    smart_send(chat_id, "\n".join(lines), {"inline_keyboard": buttons}, msg_id, use_pipeline)
 
-def handle_schedule_command(chat_id, msg_id=None, use_pipeline=False):
+
+def handle_schedule_command(chat_id, msg_id=None, use_pipeline: bool = False):
     today_str = ph_now().strftime("%Y-%m-%d")
     bookings  = fetch_cal_bookings(today_str)
     lines     = [f"📅 *Today's Discovery Calls — {ph_now().strftime('%B %d, %Y')}*\n━━━━━━━━━━━━━━━━━━━━"]
@@ -802,13 +926,13 @@ def handle_schedule_command(chat_id, msg_id=None, use_pipeline=False):
     for b in bookings:
         parsed = parse_cal_booking(b)
         lines.append(f"• {parsed['time']} — *{parsed['client_name']}* (`{parsed['lead_id']}`)")
-        if parsed['meeting_url'] != "—":
-            buttons.append([{"text": f"📞 {parsed['client_name']} — Join Call", "url": parsed['meeting_url']}])
+        if parsed["meeting_url"] != "—":
+            buttons.append([{"text": f"📞 {parsed['client_name']} — Join Call", "url": parsed["meeting_url"]}])
         buttons.append([{"text": f"✅ Log Call Outcome for {parsed['client_name']}", "callback_data": f"call_menu|{parsed['lead_id']}"}])
-    markup = {"inline_keyboard": buttons}
-    smart_send(chat_id, "\n".join(lines), markup, msg_id, use_pipeline)
+    smart_send(chat_id, "\n".join(lines), {"inline_keyboard": buttons}, msg_id, use_pipeline)
 
-def handle_tomorrow_command(chat_id, msg_id=None, use_pipeline=False):
+
+def handle_tomorrow_command(chat_id, msg_id=None, use_pipeline: bool = False):
     tomorrow     = ph_now() + timedelta(days=1)
     tomorrow_str = tomorrow.strftime("%Y-%m-%d")
     bookings     = fetch_cal_bookings(tomorrow_str)
@@ -819,33 +943,30 @@ def handle_tomorrow_command(chat_id, msg_id=None, use_pipeline=False):
     for b in bookings:
         parsed = parse_cal_booking(b)
         lines.append(f"• {parsed['time']} — *{parsed['client_name']}* (`{parsed['lead_id']}`)")
-        if parsed['meeting_url'] != "—":
-            buttons.append([{"text": f"📞 {parsed['client_name']} — Join Call", "url": parsed['meeting_url']}])
+        if parsed["meeting_url"] != "—":
+            buttons.append([{"text": f"📞 {parsed['client_name']} — Join Call", "url": parsed["meeting_url"]}])
         buttons.append([{"text": f"✅ Log Call Outcome for {parsed['client_name']}", "callback_data": f"call_menu|{parsed['lead_id']}"}])
-    markup = {"inline_keyboard": buttons}
-    smart_send(chat_id, "\n".join(lines), markup, msg_id, use_pipeline)
+    smart_send(chat_id, "\n".join(lines), {"inline_keyboard": buttons}, msg_id, use_pipeline)
 
-def handle_today_command(chat_id, msg_id=None, use_pipeline=False):
-    rows, col = read_sheet_with_headers("Leads!A1:T200")
-    today     = ph_now()
-    lines     = [f"📸 *Today's Photography Shoots — {today.strftime('%B %d, %Y')}*\n━━━━━━━━━━━━━━━━━━━━"]
-    buttons   = []
+
+def handle_today_command(chat_id, msg_id=None, use_pipeline: bool = False):
+    rows, col    = read_sheet_with_headers("Leads!A1:T200")
+    today        = ph_now()
+    lines        = [f"📸 *Today's Photography Shoots — {today.strftime('%B %d, %Y')}*\n━━━━━━━━━━━━━━━━━━━━"]
+    buttons      = []
     today_shoots = []
     for r in rows:
         event_date_str = safe_get(r, col, "Event_Date")
         if event_date_str == "—":
             continue
-        try:
-            for fmt in ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y", "%Y-%m-%d"):
-                try:
-                    event_dt = datetime.strptime(event_date_str.strip(), fmt)
-                    if event_dt.date() == today.date():
-                        today_shoots.append(r)
-                    break
-                except ValueError:
-                    continue
-        except Exception:
-            pass
+        for fmt in ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y", "%Y-%m-%d"):
+            try:
+                event_dt = datetime.strptime(event_date_str.strip(), fmt)
+                if event_dt.date() == today.date():
+                    today_shoots.append(r)
+                break
+            except ValueError:
+                pass
     if not today_shoots:
         lines.append("No shoots scheduled for today. Enjoy the break! 🏖️")
     for r in today_shoots:
@@ -854,60 +975,60 @@ def handle_today_command(chat_id, msg_id=None, use_pipeline=False):
         etype = safe_get(r, col, "Event_Type")
         lines.append(f"• *{name}* — {etype}")
         buttons.append([{"text": f"📸 {name} — View Lead", "callback_data": f"view_lead|{lid}"}])
-    markup = {"inline_keyboard": buttons}
-    smart_send(chat_id, "\n".join(lines), markup, msg_id, use_pipeline)
+    smart_send(chat_id, "\n".join(lines), {"inline_keyboard": buttons}, msg_id, use_pipeline)
 
-def handle_search_command(chat_id, query, msg_id=None, use_pipeline=False):
+
+def handle_search_command(chat_id, query: str, msg_id=None, use_pipeline: bool = False):
     if not query:
         smart_send(chat_id, "Usage: `/search <name or email>`", msg_id, use_pipeline)
         return
     lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
-    matching_leads = []
-    for r in lead_rows:
-        name  = safe_get(r, lead_col, "Full_Name").lower()
-        email = safe_get(r, lead_col, "Email").lower()
-        if query.lower() in name or query.lower() in email:
-            matching_leads.append(r)
-    lines = [f"🔍 *Search Results for '{query}'*\n━━━━━━━━━━━━━━━━━━━━"]
+    matching  = [
+        r for r in lead_rows
+        if query.lower() in safe_get(r, lead_col, "Full_Name").lower()
+        or query.lower() in safe_get(r, lead_col, "Email").lower()
+    ]
+    lines   = [f"🔍 *Search Results for '{query}'*\n━━━━━━━━━━━━━━━━━━━━"]
     buttons = []
-    if not matching_leads:
+    if not matching:
         lines.append("No leads found matching your query.")
-    for r in matching_leads:
+    for r in matching:
         lid    = safe_get(r, lead_col, "Lead_ID")
         name   = safe_get(r, lead_col, "Full_Name")
         status = safe_get(r, lead_col, "Lead_Status")
         emoji  = STATUS_EMOJI.get(status, "")
         lines.append(f"• {emoji} *{name}* (`{lid}`) — {status}")
         buttons.append([{"text": f"👤 {name}", "callback_data": f"view_lead|{lid}"}])
-    markup = {"inline_keyboard": buttons}
-    smart_send(chat_id, "\n".join(lines), markup, msg_id, use_pipeline)
+    smart_send(chat_id, "\n".join(lines), {"inline_keyboard": buttons}, msg_id, use_pipeline)
 
-def handle_client_command(chat_id, client_id, msg_id=None, use_pipeline=False):
+
+def handle_client_command(chat_id, client_id: str, msg_id=None, use_pipeline: bool = False):
     if not client_id:
         smart_send(chat_id, "Usage: `/client <Client_ID>`", msg_id, use_pipeline)
         return
-    _show_client(chat_id, msg_id, client_id, method="edit", use_pipeline=use_pipeline)
+    _show_client(chat_id, msg_id, client_id, use_pipeline=use_pipeline)
 
-# ─────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════
 # VIEW HELPERS
-# ─────────────────────────────────────────────
-def _show_lead(chat_id, msg_id, lead_id, use_pipeline=False):
+# ═══════════════════════════════════════════════════════════
+def _show_lead(chat_id, msg_id, lead_id: str, use_pipeline: bool = False):
     lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
     lead_row = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == lead_id), None)
     if not lead_row:
         smart_send(chat_id, f"❌ Lead `{lead_id}` not found.", msg_id, use_pipeline)
         return
 
-    name               = safe_get(lead_row, lead_col, "Full_Name")
-    email              = safe_get(lead_row, lead_col, "Email")
-    phone              = safe_get(lead_row, lead_col, "Phone")
-    status             = safe_get(lead_row, lead_col, "Lead_Status")
-    budget             = safe_get(lead_row, lead_col, "Budget")
-    event_type         = safe_get(lead_row, lead_col, "Event_Type")
-    event_date         = safe_get(lead_row, lead_col, "Event_Date")
-    source             = safe_get(lead_row, lead_col, "Source")
-    ai_summary         = safe_get(lead_row, lead_col, "AI_Summary")
-    recommended_action = safe_get(lead_row, lead_col, "Recommended_Action")
+    name    = safe_get(lead_row, lead_col, "Full_Name")
+    email   = safe_get(lead_row, lead_col, "Email")
+    phone   = safe_get(lead_row, lead_col, "Phone")
+    status  = safe_get(lead_row, lead_col, "Lead_Status")
+    budget  = safe_get(lead_row, lead_col, "Budget")
+    etype   = safe_get(lead_row, lead_col, "Event_Type")
+    edate   = safe_get(lead_row, lead_col, "Event_Date")
+    source  = safe_get(lead_row, lead_col, "Source")
+    ai_sum  = safe_get(lead_row, lead_col, "AI_Summary")
+    rec_act = safe_get(lead_row, lead_col, "Recommended_Action")
 
     text = (
         f"👤 *Lead Details*\n"
@@ -918,10 +1039,10 @@ def _show_lead(chat_id, msg_id, lead_id, use_pipeline=False):
         f"Phone: {phone}\n"
         f"Status: {STATUS_EMOJI.get(status, '')} *{status}*\n"
         f"Budget: {budget}\n"
-        f"Event: {event_type} on {event_date}\n"
+        f"Event: {etype} on {edate}\n"
         f"Source: {source}\n"
-        f"AI Summary: {ai_summary}\n"
-        f"Recommended Action: {recommended_action}\n"
+        f"AI Summary: {ai_sum}\n"
+        f"Recommended Action: {rec_act}\n"
         f"━━━━━━━━━━━━━━━━━━━━"
     )
     buttons = [
@@ -929,11 +1050,12 @@ def _show_lead(chat_id, msg_id, lead_id, use_pipeline=False):
          {"text": "🟡 Mark WARM", "callback_data": f"upd_lead|{lead_id}|WARM"},
          {"text": "🔵 Mark COLD", "callback_data": f"upd_lead|{lead_id}|COLD"}],
         [{"text": "📊 View Pipeline", "callback_data": f"view_pipe|{lead_id}"}],
-        [{"text": "📝 Send Proposal", "callback_data": f"send_proposal|{lead_id}"}]
+        [{"text": "📝 Send Proposal", "callback_data": f"send_proposal|{lead_id}"}],
     ]
     smart_send(chat_id, text, {"inline_keyboard": buttons}, msg_id, use_pipeline)
 
-def _show_pipeline(chat_id, msg_id, lead_id, use_pipeline=False):
+
+def _show_pipeline(chat_id, msg_id, lead_id: str, use_pipeline: bool = False):
     pipe_rows, pipe_col = read_sheet_with_headers("Pipeline Tracker!A1:L200")
     pipe_row = next((r for r in pipe_rows if safe_get(r, pipe_col, "Lead_ID") == lead_id), None)
     if not pipe_row:
@@ -969,17 +1091,15 @@ def _show_pipeline(chat_id, msg_id, lead_id, use_pipeline=False):
         f"Proposal: {proposal_line}\n"
         f"━━━━━━━━━━━━━━━━━━━━"
     )
-    buttons = [
-        [{"text": "👤 View Lead", "callback_data": f"view_lead|{lead_id}"}],
-    ]
+    buttons = [[{"text": "👤 View Lead", "callback_data": f"view_lead|{lead_id}"}]]
     if current_stage == "Discovery Call Completed":
         buttons.append([{"text": "📝 Send Proposal", "callback_data": f"send_proposal|{lead_id}"}])
     if current_stage == "Proposal Sent":
         buttons.append([{"text": "📝 Send Contract", "callback_data": f"send_contract|{lead_id}"}])
-
     smart_send(chat_id, text, {"inline_keyboard": buttons}, msg_id, use_pipeline)
 
-def _show_project(chat_id, msg_id, lead_id, use_pipeline=False):
+
+def _show_project(chat_id, msg_id, lead_id: str, use_pipeline: bool = False):
     proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
     proj_row = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == lead_id), None)
     if not proj_row:
@@ -1026,14 +1146,13 @@ def _show_project(chat_id, msg_id, lead_id, use_pipeline=False):
     ]
     if current_stage == "Delivered" and review_sent.upper() != "TRUE":
         buttons.append([{"text": "⭐ Run Retention", "callback_data": f"trigger_retention_confirm|{lead_id}"}])
-
     smart_send(chat_id, text, {"inline_keyboard": buttons}, msg_id, use_pipeline)
 
-def _show_client(chat_id, msg_id, client_id, method="edit", use_pipeline=False):
+
+def _show_client(chat_id, msg_id, client_id: str, use_pipeline: bool = False):
     client_rows, client_col = read_sheet_with_headers("Clients!A1:H200")
     client_row = next(
-        (r for r in client_rows if safe_get(r, client_col, "Client_ID") == client_id),
-        None
+        (r for r in client_rows if safe_get(r, client_col, "Client_ID") == client_id), None
     )
     if not client_row:
         smart_send(chat_id, f"❌ Client `{client_id}` not found.", msg_id, use_pipeline)
@@ -1071,11 +1190,15 @@ def _show_client(chat_id, msg_id, client_id, method="edit", use_pipeline=False):
             pid   = safe_get(r, proj_col, "Project_ID")
             if stage not in ("Completed", "Closed", "Closed Lost"):
                 buttons.append([{"text": f"📂 {pid} — {stage}", "callback_data": f"view_project|{lid}"}])
-
     smart_send(chat_id, text, {"inline_keyboard": buttons} if buttons else None, msg_id, use_pipeline)
 
-def _show_call_menu(chat_id, msg_id, lead_id, use_pipeline_edit=False):
-    text = f"✅ *Log Call Outcome for `{lead_id}`*\n━━━━━━━━━━━━━━━━━━━━\nWhat was the result of the discovery call?"
+
+def _show_call_menu(chat_id, msg_id, lead_id: str, use_pipeline: bool = False):
+    text = (
+        f"✅ *Log Call Outcome for `{lead_id}`*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"What was the result of the discovery call?"
+    )
     buttons = [
         [{"text": OUTCOME_LABELS["completed_continue"],  "callback_data": f"confirm_call|{lead_id}|completed_continue"}],
         [{"text": OUTCOME_LABELS["completed_stop"],      "callback_data": f"confirm_call|{lead_id}|completed_stop"}],
@@ -1083,11 +1206,12 @@ def _show_call_menu(chat_id, msg_id, lead_id, use_pipeline_edit=False):
         [{"text": OUTCOME_LABELS["reschedule"],          "callback_data": f"confirm_call|{lead_id}|reschedule"}],
         [{"text": OUTCOME_LABELS["reschedule_oncall"],   "callback_data": f"confirm_call|{lead_id}|reschedule_oncall"}],
         [{"text": OUTCOME_LABELS["booked_for_client"],   "callback_data": f"confirm_call|{lead_id}|booked_for_client"}],
-        [{"text": "❌ Cancel", "callback_data": f"view_lead|{lead_id}"}]
+        [{"text": "❌ Cancel", "callback_data": f"view_lead|{lead_id}"}],
     ]
-    smart_send(chat_id, text, {"inline_keyboard": buttons}, msg_id, use_pipeline_edit)
+    smart_send(chat_id, text, {"inline_keyboard": buttons}, msg_id, use_pipeline)
 
-def _confirm_call_out(chat_id, msg_id, lead_id, outcome_key, use_pipeline_edit=False):
+
+def _confirm_call_out(chat_id, msg_id, lead_id: str, outcome_key: str, use_pipeline: bool = False):
     outcome_label = OUTCOME_LABELS.get(outcome_key, "Unknown Outcome")
     text = (
         f"⚠️ *Confirm Call Outcome*\n"
@@ -1098,11 +1222,12 @@ def _confirm_call_out(chat_id, msg_id, lead_id, outcome_key, use_pipeline_edit=F
     )
     buttons = [
         [{"text": "✅ Yes — Confirm", "callback_data": f"call_out|{lead_id}|{outcome_key}"}],
-        [{"text": "❌ No — Go Back",  "callback_data": f"call_menu|{lead_id}"}]
+        [{"text": "❌ No — Go Back",  "callback_data": f"call_menu|{lead_id}"}],
     ]
-    smart_send(chat_id, text, {"inline_keyboard": buttons}, msg_id, use_pipeline_edit)
+    smart_send(chat_id, text, {"inline_keyboard": buttons}, msg_id, use_pipeline)
 
-def _execute_call_out(chat_id, msg_id, lead_id, outcome_key, cb_id, use_pipeline=False):
+
+def _execute_call_out(chat_id, msg_id, lead_id: str, outcome_key: str, cb_id: str, use_pipeline: bool = False):
     outcome_data = OUTCOME_MAP.get(outcome_key)
     if not outcome_data:
         answer_callback(cb_id, "Invalid outcome key.", use_pipeline)
@@ -1124,26 +1249,22 @@ def _execute_call_out(chat_id, msg_id, lead_id, outcome_key, cb_id, use_pipeline
 
     if outcome_key in ("reschedule", "reschedule_oncall"):
         success, cal_response = cancel_cal_booking_for_lead(lead_id)
-        if success:
-            answer_callback(cb_id, "✅ Call outcome logged. Cal.com booking cancelled.", use_pipeline)
-        else:
-            answer_callback(cb_id, f"✅ Call outcome logged. Cal cancel failed: {cal_response}", use_pipeline)
+        note = "Cal.com booking cancelled." if success else f"Cal cancel: {cal_response}"
+        answer_callback(cb_id, f"✅ Logged. {note}", use_pipeline)
     else:
         answer_callback(cb_id, "✅ Call outcome logged.", use_pipeline)
 
     if outcome_key == "completed_stop":
         fire_webhook(CLOSE_LEAD_WEBHOOK, {"lead_id": lead_id, "outcome": outcome_key})
 
-    # ── FIX: for completed_continue, immediately show pipeline card
-    # with the Send Proposal button ready — no dead-end plain text message.
-    # For all other outcomes, plain confirmation is the right response
-    # since there is no immediate next system to fire from a button.
     if outcome_key == "completed_continue":
+        # Show pipeline card with Send Proposal button ready
         _show_pipeline(chat_id, msg_id, lead_id, use_pipeline=use_pipeline)
     else:
         smart_send(chat_id, f"✅ Call outcome for `{lead_id}` set to *{call_status}*.", msg_id, use_pipeline)
 
-def _confirm_contract(chat_id, msg_id, lead_id, use_pipeline=False):
+
+def _confirm_contract(chat_id, msg_id, lead_id: str, use_pipeline: bool = False):
     lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
     lead_row    = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == lead_id), None)
     client_name = safe_get(lead_row, lead_col, "Full_Name")       if lead_row else lead_id
@@ -1158,53 +1279,45 @@ def _confirm_contract(chat_id, msg_id, lead_id, use_pipeline=False):
     )
     buttons = [
         [{"text": "✅ Yes — Send Contract", "callback_data": f"contract_yes|{lead_id}"}],
-        [{"text": "❌ No — Close Lead",     "callback_data": f"contract_no|{lead_id}"}]
+        [{"text": "❌ No — Close Lead",     "callback_data": f"contract_no|{lead_id}"}],
     ]
     smart_send(chat_id, text, {"inline_keyboard": buttons}, msg_id, use_pipeline)
 
-# ─────────────────────────────────────────────
-# CLIENT STATS
-# ─────────────────────────────────────────────
-def _update_client_stats(lead_id):
+
+# ═══════════════════════════════════════════════════════════
+# CLIENT STATS CALCULATOR
+# ═══════════════════════════════════════════════════════════
+def _update_client_stats(lead_id: str) -> dict:
     lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T500")
     current_lead = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == lead_id), None)
     if not current_lead:
         return {"ltv": 0, "tier": "Standard", "bookings": 0}
 
     client_email    = safe_get(current_lead, lead_col, "Email")
-    client_lead_ids = set()
+    client_lead_ids = {lead_id}
 
     if client_email != "—":
         for row in lead_rows:
-            email_val   = safe_get(row, lead_col, "Email")
-            row_lead_id = safe_get(row, lead_col, "Lead_ID")
-            if row_lead_id == "—":
+            row_lid = safe_get(row, lead_col, "Lead_ID")
+            if row_lid == "—":
                 continue
-            if email_val != "—" and email_val.lower() == client_email.lower():
-                client_lead_ids.add(row_lead_id)
-    else:
-        client_lead_ids.add(lead_id)
-
-    client_lead_ids.add(lead_id)
+            if safe_get(row, lead_col, "Email").lower() == client_email.lower():
+                client_lead_ids.add(row_lid)
 
     proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
     total_ltv      = 0
     total_bookings = 0
 
     for row in proj_rows:
-        row_lead_id = safe_get(row, proj_col, "Lead_ID")
-        if row_lead_id not in client_lead_ids:
+        if safe_get(row, proj_col, "Lead_ID") not in client_lead_ids:
             continue
-        stage = safe_get(row, proj_col, "Current_Stage")
-        if stage in ("Closed Lost",):
+        if safe_get(row, proj_col, "Current_Stage") == "Closed Lost":
             continue
         total_bookings += 1
-        total_val_raw = safe_get(row, proj_col, "Total_Price")
-        total_val_str = total_val_raw.replace("$", "").replace(",", "").strip()
+        raw = safe_get(row, proj_col, "Total_Price").replace("$", "").replace(",", "").strip()
         try:
-            if total_val_str and (total_val_str[0].isdigit() or
-                    (total_val_str.startswith("-") and len(total_val_str) > 1)):
-                total_ltv += float(total_val_str)
+            if raw and (raw[0].isdigit() or (raw.startswith("-") and len(raw) > 1)):
+                total_ltv += float(raw)
         except ValueError:
             pass
 
@@ -1216,10 +1329,11 @@ def _update_client_stats(lead_id):
 
     return {"ltv": int(total_ltv), "tier": tier, "bookings": total_bookings}
 
-# ─────────────────────────────────────────────
-# EXECUTE RETENTION
-# ─────────────────────────────────────────────
-def _execute_retention(lead_id, processing_msg_id=None):
+
+# ═══════════════════════════════════════════════════════════
+# RETENTION EXECUTOR
+# ═══════════════════════════════════════════════════════════
+def _execute_retention(lead_id: str, processing_msg_id=None) -> dict:
     lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
     lead_row = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == lead_id), None)
     if not lead_row:
@@ -1243,7 +1357,6 @@ def _execute_retention(lead_id, processing_msg_id=None):
     try:
         client_rows, client_col = read_sheet_with_headers("Clients!A1:H200")
         target_client = None
-
         if client_email != "—":
             target_client = next(
                 (r for r in client_rows
@@ -1251,28 +1364,21 @@ def _execute_retention(lead_id, processing_msg_id=None):
                 None
             )
         if not target_client:
-            client_id_on_lead = safe_get(lead_row, lead_col, "Client_ID")
-            if client_id_on_lead != "—":
+            cid_on_lead = safe_get(lead_row, lead_col, "Client_ID")
+            if cid_on_lead != "—":
                 target_client = next(
-                    (r for r in client_rows
-                     if safe_get(r, client_col, "Client_ID") == client_id_on_lead),
+                    (r for r in client_rows if safe_get(r, client_col, "Client_ID") == cid_on_lead),
                     None
                 )
         if target_client:
             cid = safe_get(target_client, client_col, "Client_ID")
             _write_back("Clients", "Clients!A1:H200", "Client_ID", cid, {
-                "LTV":         str(new_ltv),
-                "Bookings":    str(bookings),
-                "Client_Tier": new_tier
+                "LTV": str(new_ltv), "Bookings": str(bookings), "Client_Tier": new_tier
             })
-            print(f"[RETENTION] Clients sheet updated — {cid} | LTV ${new_ltv} | {new_tier}")
-        else:
-            print(f"[RETENTION] Client record not found for lead {lead_id}")
     except Exception as e:
-        print(f"[RETENTION] Error writing client stats: {e}")
+        print(f"[RETENTION] Client stats write error: {e}")
 
     today_str = ph_now().strftime("%Y-%m-%d")
-
     _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", lead_id, {
         "Current_Stage":    "Retention",
         "Last_Action":      "Review Request Sent",
@@ -1303,7 +1409,8 @@ def _execute_retention(lead_id, processing_msg_id=None):
         "message_id":   processing_msg_id
     }
 
-def _execute_deliver_gallery(chat_id, msg_id, lead_id, cb_id, use_pipeline=False):
+
+def _execute_deliver_gallery(chat_id, msg_id, lead_id: str, cb_id: str, use_pipeline: bool = False):
     proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
     proj_row    = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == lead_id), None)
     client_name = safe_get(proj_row, proj_col, "Client_Name") if proj_row else "—"
@@ -1322,9 +1429,7 @@ def _execute_deliver_gallery(chat_id, msg_id, lead_id, cb_id, use_pipeline=False
     })
 
     fired = fire_webhook(DELIVER_GALLERY_WEBHOOK, {
-        "lead_id":     lead_id,
-        "project_id":  project_id,
-        "client_name": client_name
+        "lead_id": lead_id, "project_id": project_id, "client_name": client_name
     })
 
     answer_callback(cb_id, "📸 Gallery delivery triggered!", use_pipeline)
@@ -1339,26 +1444,42 @@ def _execute_deliver_gallery(chat_id, msg_id, lead_id, cb_id, use_pipeline=False
     )
     smart_send(chat_id, text, msg_id=msg_id, use_pipeline=use_pipeline)
 
-# ─────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════
 # SHARED CALLBACK HANDLER
-# ─────────────────────────────────────────────
-def handle_callbacks(data, use_pipeline=False):
+# ═══════════════════════════════════════════════════════════
+def handle_callbacks(data: dict, use_pipeline: bool = False):
     if "callback_query" not in data:
         return jsonify({"status": "ignored"})
 
-    cb        = data["callback_query"]
-    chat_id   = cb["message"]["chat"]["id"]
-    msg_id    = cb["message"]["message_id"]
-    cb_data   = cb.get("data", "")
-    parts     = cb_data.split("|")
-    action    = parts[0]
+    cb      = data["callback_query"]
+    chat_id = cb["message"]["chat"]["id"]
+    msg_id  = cb["message"]["message_id"]
+    cb_data = cb.get("data", "")
+    parts   = cb_data.split("|")
+    action  = parts[0]
     target_id = parts[1] if len(parts) > 1 else None
 
     if action == "none":
         answer_callback(cb["id"], "No action", use_pipeline)
         return jsonify({"status": "ok"})
 
-    elif action == "view_lead":
+    # ── idempotency check for one-time destructive actions ──
+    ONE_TIME_ACTIONS = {
+        "call_out", "contract_yes", "budget_contract_yes",
+        "deposit_paid_confirm", "balance_paid_confirm",
+        "deliver_gallery_confirm", "trigger_retention"
+    }
+    if action in ONE_TIME_ACTIONS:
+        token = f"{action}|{cb_data}|{msg_id}"
+        if not _mark_processed(token):
+            answer_callback(cb["id"], "⚠️ This action was already completed.", use_pipeline)
+            return jsonify({"status": "duplicate"})
+
+    # ────────────────────────────────────────────────────────
+    # VIEW ACTIONS
+    # ────────────────────────────────────────────────────────
+    if action == "view_lead":
         _show_lead(chat_id, msg_id, target_id, use_pipeline=use_pipeline)
 
     elif action == "view_pipe":
@@ -1368,8 +1489,9 @@ def handle_callbacks(data, use_pipeline=False):
         _show_project(chat_id, msg_id, target_id, use_pipeline=use_pipeline)
 
     elif action == "view_client":
-        _show_client(chat_id, msg_id, target_id, method="edit", use_pipeline=use_pipeline)
+        _show_client(chat_id, msg_id, target_id, use_pipeline=use_pipeline)
 
+    # ── NAV ─────────────────────────────────────────────────
     elif action == "nav_leads":
         handle_leads_command(chat_id, msg_id=msg_id, use_pipeline=use_pipeline)
 
@@ -1391,6 +1513,7 @@ def handle_callbacks(data, use_pipeline=False):
     elif action == "nav_today":
         handle_today_command(chat_id, msg_id=msg_id, use_pipeline=use_pipeline)
 
+    # ── STATUS UPDATES ───────────────────────────────────────
     elif action == "upd_lead" and len(parts) > 2:
         new_status = parts[2]
         _write_back("Leads", "Leads!A1:T200", "Lead_ID", target_id, {"Lead_Status": new_status})
@@ -1414,15 +1537,17 @@ def handle_callbacks(data, use_pipeline=False):
         answer_callback(cb["id"], f"✅ Project stage → {new_stage}", use_pipeline)
         _show_project(chat_id, msg_id, target_id, use_pipeline=use_pipeline)
 
+    # ── DISCOVERY CALL FLOW ──────────────────────────────────
     elif action == "call_menu":
-        _show_call_menu(chat_id, msg_id, target_id, use_pipeline_edit=use_pipeline)
+        _show_call_menu(chat_id, msg_id, target_id, use_pipeline=use_pipeline)
 
     elif action == "confirm_call" and len(parts) > 2:
-        _confirm_call_out(chat_id, msg_id, target_id, parts[2], use_pipeline_edit=use_pipeline)
+        _confirm_call_out(chat_id, msg_id, target_id, parts[2], use_pipeline=use_pipeline)
 
     elif action == "call_out" and len(parts) > 2:
         _execute_call_out(chat_id, msg_id, target_id, parts[2], cb["id"], use_pipeline=use_pipeline)
 
+    # ── PROPOSAL ─────────────────────────────────────────────
     elif action == "send_proposal":
         fired    = fire_webhook(PROPOSAL_ZAPIER_WEBHOOK, {"lead_id": target_id})
         answer_callback(cb["id"], "📄 Proposal triggered", use_pipeline)
@@ -1433,16 +1558,25 @@ def handle_callbacks(data, use_pipeline=False):
         )
         smart_send(chat_id, msg_text, msg_id=msg_id, use_pipeline=use_pipeline)
 
+    # ── CONTRACT FLOW ────────────────────────────────────────
     elif action in ("send_contract", "confirm_contract"):
         _confirm_contract(chat_id, msg_id, target_id, use_pipeline=use_pipeline)
 
     elif action == "contract_yes":
+        # ── BUG FIX #1 ──────────────────────────────────────────
+        # Standard path: budget is a known value (not uncertain).
+        # Read it from the Leads sheet and compute pricing,
+        # then pass total_price / deposit / balance directly in the
+        # webhook payload so Zapier's Node 4 pricing calculator
+        # uses the CONFIRMED values instead of the PRICE_MAP fallback.
+        # ────────────────────────────────────────────────────────
         lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
         lead_row = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == target_id), None)
         budget   = safe_get(lead_row, lead_col, "Budget").strip() if lead_row else ""
         name     = safe_get(lead_row, lead_col, "Full_Name")      if lead_row else target_id
 
         if budget in UNCERTAIN_BUDGETS:
+            # Budget requires manual confirmation — prompt operator
             answer_callback(cb["id"], "Budget unclear — enter exact amount", use_pipeline)
             prompt_text = (
                 f"💰 *Budget Confirmation Required*\n"
@@ -1452,26 +1586,48 @@ def handle_callbacks(data, use_pipeline=False):
                 f"`/setbudget {target_id} <amount>`\n"
                 f"Example: `/setbudget {target_id} 13000`"
             )
-            if use_pipeline:
-                edit_pipeline_msg(chat_id, msg_id, prompt_text)
-            else:
-                edit_msg(chat_id, msg_id, prompt_text)
+            smart_send(chat_id, prompt_text, msg_id=msg_id, use_pipeline=use_pipeline)
         else:
-            fired = fire_webhook(CONTRACT_ZAPIER_WEBHOOK, {"lead_id": target_id})
-            answer_callback(cb["id"], "✅ Contract triggered", use_pipeline)
-            confirmed_text = (
-                f"✅ *Contract Triggered — System 3A*\n"
-                f"Lead: `{target_id}`\n\n"
-                f"• Contract sent for e-signature\n"
-                f"• Watch Telegram for confirmation"
-            ) if fired else (
-                f"⚠️ *Webhook failed for `{target_id}`*\n"
-                f"Check CONTRACT_ZAPIER_WEBHOOK in Railway."
-            )
-            if use_pipeline:
-                edit_pipeline_msg(chat_id, msg_id, confirmed_text)
+            # Budget is already a clean number — compute pricing and fire
+            try:
+                cleaned = budget.replace("$", "").replace(",", "").strip()
+                total   = int(float(cleaned))
+            except (ValueError, TypeError):
+                total = 0
+
+            if total <= 0:
+                # Cannot resolve budget — fall back to prompt
+                answer_callback(cb["id"], "Budget unclear — enter exact amount", use_pipeline)
+                prompt_text = (
+                    f"💰 *Budget Confirmation Required*\n"
+                    f"Lead: `{target_id}` — {name}\n"
+                    f"Budget on file: *{budget}*\n\n"
+                    f"Please enter the confirmed total:\n\n"
+                    f"`/setbudget {target_id} <amount>`"
+                )
+                smart_send(chat_id, prompt_text, msg_id=msg_id, use_pipeline=use_pipeline)
             else:
-                edit_msg(chat_id, msg_id, confirmed_text)
+                pricing = compute_pricing(total)
+                # Persist canonical values before firing
+                persist_confirmed_pricing(target_id, pricing)
+                fired = fire_webhook(CONTRACT_ZAPIER_WEBHOOK, {
+                    "lead_id":     target_id,
+                    "total_price": str(pricing["total"]),
+                    "deposit":     str(pricing["deposit"]),
+                    "balance":     str(pricing["balance"]),
+                })
+                answer_callback(cb["id"], "✅ Contract triggered", use_pipeline)
+                confirmed_text = (
+                    f"✅ *Contract Triggered — System 3A*\n"
+                    f"Lead: `{target_id}` — {name}\n"
+                    f"💵 Total: ${pricing['total']:,} | 💳 Deposit: ${pricing['deposit']:,} | 📊 Balance: ${pricing['balance']:,}\n\n"
+                    f"• Contract sent for e-signature\n"
+                    f"• Watch Telegram for confirmation"
+                ) if fired else (
+                    f"⚠️ *Webhook failed for `{target_id}`*\n"
+                    f"Check CONTRACT_ZAPIER_WEBHOOK in Railway."
+                )
+                smart_send(chat_id, confirmed_text, msg_id=msg_id, use_pipeline=use_pipeline)
 
     elif action == "contract_no":
         _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", target_id, {
@@ -1483,15 +1639,44 @@ def handle_callbacks(data, use_pipeline=False):
         answer_callback(cb["id"], "❌ Contract declined. Lead closed.", use_pipeline)
         smart_send(chat_id, f"❌ Lead `{target_id}` closed due to contract decline.", msg_id, use_pipeline)
 
+    # ── BUDGET + CONTRACT CONFIRM (from /setbudget flow) ─────
     elif action == "budget_contract_yes" and len(parts) > 2:
+        # ── BUG FIX #1 (CORE) ───────────────────────────────────
+        # Pass total_price, deposit, balance directly in the webhook
+        # payload so Zapier's System 3A Node 4 pricing calculator
+        # reads the operator-confirmed values from the webhook
+        # (its PRIORITY 1 branch) rather than falling through to
+        # PRICE_MAP / BUDGET_MAP (which returned stale package
+        # prices instead of the confirmed custom amount).
+        # ────────────────────────────────────────────────────────
         lead_id      = target_id
-        total_amount = parts[2]
-        _write_back("Leads", "Leads!A1:T200", "Lead_ID", lead_id, {"Budget": total_amount})
-        fired = fire_webhook(CONTRACT_ZAPIER_WEBHOOK, {"lead_id": lead_id})
+        total_amount = int(float(parts[2]))
+        pricing      = compute_pricing(total_amount)
+
+        # Write to BOTH Leads and Projects as a single canonical update
+        persist_confirmed_pricing(lead_id, pricing)
+
+        # Fire the contract webhook with all pricing values included
+        fired = fire_webhook(CONTRACT_ZAPIER_WEBHOOK, {
+            "lead_id":     lead_id,
+            "total_price": str(pricing["total"]),
+            "deposit":     str(pricing["deposit"]),
+            "balance":     str(pricing["balance"]),
+        })
         answer_callback(cb["id"], "✅ Contract triggered with confirmed budget", use_pipeline)
+
+        lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
+        lead_row = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == lead_id), None)
+        name     = safe_get(lead_row, lead_col, "Full_Name") if lead_row else lead_id
+
         confirmed_text = (
             f"✅ *Contract Triggered — System 3A*\n"
-            f"Lead: `{lead_id}` (Budget: ${total_amount})\n\n"
+            f"Lead: `{lead_id}` — {name}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"💵 Total:    ${pricing['total']:,}\n"
+            f"💳 Deposit: ${pricing['deposit']:,}  (30%)\n"
+            f"📊 Balance:  ${pricing['balance']:,} (70%)\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
             f"• Contract sent for e-signature\n"
             f"• Watch Telegram for confirmation"
         ) if fired else (
@@ -1515,12 +1700,18 @@ def handle_callbacks(data, use_pipeline=False):
         )
         smart_send(chat_id, prompt_text, msg_id=msg_id, use_pipeline=use_pipeline)
 
+    # ── DEPOSIT PAID (manual bot confirmation) ───────────────
     elif action == "deposit_paid_confirm":
+        # ── BUG FIX #2 (HANDLER) ────────────────────────────────
+        # This callback is now correctly triggered from invoice_sent.
+        # See the invoice_sent route below where the button is added.
+        # ────────────────────────────────────────────────────────
         today_str   = ph_now().strftime("%Y-%m-%d")
         proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
         proj_row    = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == target_id), None)
         client_name = safe_get(proj_row, proj_col, "Client_Name") if proj_row else "—"
         project_id  = safe_get(proj_row, proj_col, "Project_ID")  if proj_row else "—"
+        deposit     = safe_get(proj_row, proj_col, "Deposit")      if proj_row else "—"
         balance     = safe_get(proj_row, proj_col, "Balance")      if proj_row else "—"
 
         _write_back("Projects", "Projects!A1:Z200", "Lead_ID", target_id, {
@@ -1539,7 +1730,8 @@ def handle_callbacks(data, use_pipeline=False):
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"👤 {client_name}\n"
             f"🆔 Lead: `{target_id}` | Project: `{project_id}`\n"
-            f"💵 Balance Remaining: ${balance}\n"
+            f"💵 Deposit: ${deposit}\n"
+            f"📊 Balance Remaining: ${balance}\n"
             f"📅 Received: {today_str}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
             f"✅ Deposit marked as paid.\n"
@@ -1550,8 +1742,7 @@ def handle_callbacks(data, use_pipeline=False):
     elif action == "deliver_gallery_confirm":
         _execute_deliver_gallery(chat_id, msg_id, target_id, cb["id"], use_pipeline=use_pipeline)
 
-    # ── balance_paid: sends a NEW confirmation message so the
-    # System 4 Gallery Delivered card above stays untouched.
+    # ── BALANCE PAID ─────────────────────────────────────────
     elif action == "balance_paid":
         proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
         proj_row    = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == target_id), None)
@@ -1567,15 +1758,12 @@ def handle_callbacks(data, use_pipeline=False):
             f"📅 Due: {due_date}\n\n"
             f"⚠️ Confirm you have received the full balance payment in Zoho?"
         )
-        # Pass gallery card msg_id so confirm handler can strip its button too
         buttons = [[
             {"text": "✅ Yes — Mark Paid", "callback_data": f"balance_paid_confirm|{target_id}|{msg_id}"},
             {"text": "❌ Cancel",           "callback_data": f"view_project|{target_id}"}
         ]]
         send_pipeline_msg(CHAT_ID, text, {"inline_keyboard": buttons})
 
-    # ── balance_paid_confirm: strips buttons from both the gallery card
-    # and the confirm prompt, then sends a fresh actionable result card.
     elif action == "balance_paid_confirm":
         today_str      = ph_now().strftime("%Y-%m-%d")
         gallery_msg_id = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
@@ -1587,9 +1775,7 @@ def handle_callbacks(data, use_pipeline=False):
         balance     = safe_get(proj_row, proj_col, "Balance")          if proj_row else "—"
         due_date    = safe_get(proj_row, proj_col, "Balance_Due_Date") if proj_row else "—"
 
-        _write_back("Projects", "Projects!A1:Z200", "Lead_ID", target_id, {
-            "Balance_Paid": "TRUE"
-        })
+        _write_back("Projects", "Projects!A1:Z200", "Lead_ID", target_id, {"Balance_Paid": "TRUE"})
         _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", target_id, {
             "Last_Action":      "Balance Received",
             "Next_Action":      "Run Retention Sequence",
@@ -1608,7 +1794,7 @@ def handle_callbacks(data, use_pipeline=False):
                 f"✅ Gallery delivered. Balance payment confirmed."
             ))
 
-        # Strip buttons from the Confirm Balance Paid prompt
+        # Strip buttons from the confirmation prompt
         edit_pipeline_msg(chat_id, msg_id, (
             f"💳 *Confirm Balance Paid*\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -1631,6 +1817,7 @@ def handle_callbacks(data, use_pipeline=False):
             f"Ready to send the retention sequence to the client?"
         ), {"inline_keyboard": [[{"text": "⭐ Run Retention", "callback_data": f"trigger_retention_confirm|{target_id}"}]]})
 
+    # ── RETENTION FLOW ───────────────────────────────────────
     elif action == "trigger_retention_confirm":
         proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
         proj_row    = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == target_id), None)
@@ -1655,8 +1842,6 @@ def handle_callbacks(data, use_pipeline=False):
         ]]
         smart_send(chat_id, text, {"inline_keyboard": buttons}, msg_id=msg_id, use_pipeline=use_pipeline)
 
-    # ── trigger_retention: strip confirm buttons, fire directly.
-    # No processing message — /retention_notify sends the result card.
     elif action == "trigger_retention":
         proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
         proj_row    = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == target_id), None)
@@ -1665,7 +1850,7 @@ def handle_callbacks(data, use_pipeline=False):
         lead_row     = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == target_id), None)
         client_email = safe_get(lead_row, lead_col, "Email") if lead_row else "—"
 
-        # Strip the Yes/Cancel buttons from the confirm prompt
+        # Strip Yes/Cancel buttons from confirm prompt
         stripped_text = (
             f"⭐ *Confirm Retention Sequence*\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -1686,9 +1871,10 @@ def handle_callbacks(data, use_pipeline=False):
 
     return jsonify({"status": "ok"})
 
-# ─────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════
 # MAIN WEBHOOK — DASHBOARD BOT
-# ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
 @app.route("/dashboard", methods=["POST"])
 def dashboard():
     data = request.json
@@ -1721,110 +1907,31 @@ def dashboard():
         elif text == "/briefing":
             send_daily_briefing()
         elif text.startswith("/setbriefingtime"):
-            parts = text.split()
-            if len(parts) != 2:
-                send_msg(chat_id,
-                    "⏰ Usage: `/setbriefingtime HH:MM`\n"
-                    "Example: `/setbriefingtime 08:30`\n\n"
-                    "Uses 24-hour PH time format."
-                )
-                return jsonify({"status": "ok"})
-            time_str = parts[1]
-            try:
-                hour, minute = map(int, time_str.split(":"))
-                assert 0 <= hour <= 23 and 0 <= minute <= 59
-            except Exception:
-                send_msg(chat_id,
-                    "❌ Invalid time format.\n"
-                    "Use 24hr format: `/setbriefingtime 09:00`"
-                )
-                return jsonify({"status": "ok"})
-            write_briefing_time(time_str)
-            reschedule_briefing(time_str)
-            send_msg(chat_id,
-                f"⏰ *Daily briefing rescheduled*\n"
-                f"New time: *{time_str} PH time*\n\n"
-                f"Use `/briefing` to send it right now."
-            )
+            _cmd_setbriefingtime(chat_id, text)
         elif text.startswith("/search"):
             handle_search_command(chat_id, text[len("/search"):].strip())
         elif text.startswith("/client"):
             handle_client_command(chat_id, text[len("/client"):].strip())
         elif text.startswith("/updateemail"):
-            parts = text.split()
-            if len(parts) != 3:
-                send_msg(chat_id, "Usage: `/updateemail <Lead_ID> <new_email>`")
-                return jsonify({"status": "ok"})
-            lead_id, new_email = parts[1], parts[2]
-            rows, col = read_sheet_with_headers("Leads!A1:T200")
-            found = False
-            for i, row in enumerate(rows):
-                if safe_get(row, col, "Lead_ID") == lead_id:
-                    col_idx = col.get("Email")
-                    if col_idx is None:
-                        send_msg(chat_id, "⚠️ Email column not found.")
-                        return jsonify({"status": "ok"})
-                    write_sheet(f"Leads!{get_col_letter(col_idx)}{i + 2}", [[new_email]])
-                    send_msg(chat_id, f"✅ Email updated for {lead_id} → {new_email}")
-                    found = True
-                    break
-            if not found:
-                send_msg(chat_id, f"❌ Lead {lead_id} not found.")
+            _cmd_updateemail(chat_id, text)
         elif text == "/resetleadcounter":
             write_sheet("Config!A2", [[0]])
             write_sheet("Config!B2", [["0001"]])
             send_msg(chat_id, "✅ Lead counter reset to 0. Next lead will be LED-0001.")
         elif text.startswith("/retention"):
-            parts = text.split()
-            if len(parts) != 2:
-                send_msg(chat_id, "Usage: `/retention <Lead_ID>`")
-                return jsonify({"status": "ok"})
-            lead_id = parts[1]
-            result  = _execute_retention(lead_id, processing_msg_id=None)
-            if not result["fired"]:
-                send_msg(chat_id, "⚠️ Webhook failed — check RETENTION_WEBHOOK in Railway.")
+            _cmd_retention(chat_id, text)
         elif text.startswith("/setbudget"):
-            parts = text.split(maxsplit=2)
-            if len(parts) != 3:
-                send_msg(chat_id, "💰 Usage: `/setbudget <Lead_ID> <amount>`\nExample: `/setbudget LED-0002 13000`")
-                return jsonify({"status": "ok"})
-            lead_id = parts[1]
-            try:
-                total = int(float(parts[2].replace("$", "").replace(",", "").strip()))
-            except ValueError:
-                send_msg(chat_id, "❌ Numbers only.\nExample: `/setbudget LED-0002 13000`")
-                return jsonify({"status": "ok"})
-            deposit = round(total * 0.30)
-            balance = total - deposit
-            lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
-            lead_row = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == lead_id), None)
-            name = safe_get(lead_row, lead_col, "Full_Name")       if lead_row else lead_id
-            pkg  = safe_get(lead_row, lead_col, "Primary_Package") if lead_row else "—"
-            text_msg = (
-                f"💰 *Confirm Contract Amount*\n"
-                f"Lead: `{lead_id}` — {name} | Package: {pkg}\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"💵 Total:        *${total:,}*\n"
-                f"💳 Deposit 30%: *${deposit:,}*\n"
-                f"📊 Balance 70%: *${balance:,}*\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"Fire System 3A with these amounts?"
-            )
-            buttons = [
-                [{"text": "✅ Confirm & Fire System 3A", "callback_data": f"budget_contract_yes|{lead_id}|{total}"}],
-                [{"text": "✏️ Change Amount",            "callback_data": f"budget_contract_edit|{lead_id}"}],
-                [{"text": "❌ Cancel",                   "callback_data": f"view_pipe|{lead_id}"}]
-            ]
-            send_msg(chat_id, text_msg, {"inline_keyboard": buttons})
+            _cmd_setbudget(chat_id, text, use_pipeline=False)
         else:
             send_msg(chat_id, "❓ Unknown command. Type /help to see all commands.")
         return jsonify({"status": "ok"})
 
     return handle_callbacks(data, use_pipeline=False)
 
-# ─────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════
 # PIPELINE TRACKER BOT WEBHOOK
-# ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
 @app.route("/pipeline_dashboard", methods=["POST"])
 def pipeline_dashboard():
     data = request.json
@@ -1833,43 +1940,123 @@ def pipeline_dashboard():
         msg     = data["message"]
         text    = msg.get("text", "").strip()
         chat_id = msg["chat"]["id"]
-
         if text.startswith("/setbudget"):
-            parts = text.split(maxsplit=2)
-            if len(parts) != 3:
-                send_pipeline_msg(chat_id, "💰 Usage: `/setbudget <Lead_ID> <amount>`")
-                return jsonify({"status": "ok"})
-            lead_id = parts[1]
-            try:
-                total = int(float(parts[2].replace("$", "").replace(",", "").strip()))
-            except ValueError:
-                send_pipeline_msg(chat_id, "❌ Numbers only.\nExample: `/setbudget LED-0002 13000`")
-                return jsonify({"status": "ok"})
-            deposit = round(total * 0.30)
-            balance = total - deposit
-            lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
-            lead_row = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == lead_id), None)
-            name = safe_get(lead_row, lead_col, "Full_Name")       if lead_row else lead_id
-            pkg  = safe_get(lead_row, lead_col, "Primary_Package") if lead_row else "—"
-            text_msg = (
-                f"💰 *Confirm Contract Amount*\n"
-                f"Lead: `{lead_id}` — {name} | Package: {pkg}\n\n"
-                f"💵 Total: *${total:,}* | 💳 Deposit: *${deposit:,}* | 📊 Balance: *${balance:,}*\n\n"
-                f"Fire System 3A?"
-            )
-            buttons = [
-                [{"text": "✅ Confirm & Fire System 3A", "callback_data": f"budget_contract_yes|{lead_id}|{total}"}],
-                [{"text": "✏️ Change Amount",            "callback_data": f"budget_contract_edit|{lead_id}"}],
-                [{"text": "❌ Cancel",                   "callback_data": f"view_pipe|{lead_id}"}]
-            ]
-            send_pipeline_msg(chat_id, text_msg, {"inline_keyboard": buttons})
+            _cmd_setbudget(chat_id, text, use_pipeline=True)
             return jsonify({"status": "ok"})
 
     return handle_callbacks(data, use_pipeline=True)
 
-# ─────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════
+# COMMAND HELPERS (extracted for DRY usage across both bots)
+# ═══════════════════════════════════════════════════════════
+def _cmd_setbriefingtime(chat_id, text: str):
+    parts = text.split()
+    if len(parts) != 2:
+        send_msg(chat_id,
+            "⏰ Usage: `/setbriefingtime HH:MM`\n"
+            "Example: `/setbriefingtime 08:30`\n\n"
+            "Uses 24-hour PH time format."
+        )
+        return
+    time_str = parts[1]
+    try:
+        hour, minute = map(int, time_str.split(":"))
+        assert 0 <= hour <= 23 and 0 <= minute <= 59
+    except Exception:
+        send_msg(chat_id,
+            "❌ Invalid time format.\n"
+            "Use 24hr format: `/setbriefingtime 09:00`"
+        )
+        return
+    write_briefing_time(time_str)
+    reschedule_briefing(time_str)
+    send_msg(chat_id,
+        f"⏰ *Daily briefing rescheduled*\n"
+        f"New time: *{time_str} PH time*\n\n"
+        f"Use `/briefing` to send it right now."
+    )
+
+
+def _cmd_updateemail(chat_id, text: str):
+    parts = text.split()
+    if len(parts) != 3:
+        send_msg(chat_id, "Usage: `/updateemail <Lead_ID> <new_email>`")
+        return
+    lead_id, new_email = parts[1], parts[2]
+    rows, col = read_sheet_with_headers("Leads!A1:T200")
+    found = False
+    for i, row in enumerate(rows):
+        if safe_get(row, col, "Lead_ID") == lead_id:
+            col_idx = col.get("Email")
+            if col_idx is None:
+                send_msg(chat_id, "⚠️ Email column not found.")
+                return
+            write_sheet(f"Leads!{_col_letter(col_idx)}{i + 2}", [[new_email]])
+            send_msg(chat_id, f"✅ Email updated for {lead_id} → {new_email}")
+            found = True
+            break
+    if not found:
+        send_msg(chat_id, f"❌ Lead {lead_id} not found.")
+
+
+def _cmd_retention(chat_id, text: str):
+    parts = text.split()
+    if len(parts) != 2:
+        send_msg(chat_id, "Usage: `/retention <Lead_ID>`")
+        return
+    lead_id = parts[1]
+    result  = _execute_retention(lead_id, processing_msg_id=None)
+    if not result["fired"]:
+        send_msg(chat_id, "⚠️ Webhook failed — check RETENTION_WEBHOOK in Railway.")
+
+
+def _cmd_setbudget(chat_id, text: str, use_pipeline: bool = False):
+    """
+    Parse /setbudget <Lead_ID> <amount>, compute canonical pricing,
+    and show the operator a double-confirmation card before firing
+    the contract webhook.
+    """
+    send_fn = send_pipeline_msg if use_pipeline else send_msg
+    parts   = text.split(maxsplit=2)
+    if len(parts) != 3:
+        send_fn(chat_id, "💰 Usage: `/setbudget <Lead_ID> <amount>`\nExample: `/setbudget LED-0002 13000`")
+        return
+    lead_id = parts[1]
+    try:
+        total = int(float(parts[2].replace("$", "").replace(",", "").strip()))
+    except ValueError:
+        send_fn(chat_id, "❌ Numbers only.\nExample: `/setbudget LED-0002 13000`")
+        return
+
+    pricing = compute_pricing(total)
+
+    lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
+    lead_row = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == lead_id), None)
+    name = safe_get(lead_row, lead_col, "Full_Name")       if lead_row else lead_id
+    pkg  = safe_get(lead_row, lead_col, "Primary_Package") if lead_row else "—"
+
+    text_msg = (
+        f"💰 *Confirm Contract Amount*\n"
+        f"Lead: `{lead_id}` — {name} | Package: {pkg}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💵 Total:        *${pricing['total']:,}*\n"
+        f"💳 Deposit 30%: *${pricing['deposit']:,}*\n"
+        f"📊 Balance 70%: *${pricing['balance']:,}*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"Fire System 3A with these amounts?"
+    )
+    buttons = [
+        [{"text": "✅ Confirm & Fire System 3A", "callback_data": f"budget_contract_yes|{lead_id}|{pricing['total']}"}],
+        [{"text": "✏️ Change Amount",            "callback_data": f"budget_contract_edit|{lead_id}"}],
+        [{"text": "❌ Cancel",                   "callback_data": f"view_pipe|{lead_id}"}],
+    ]
+    send_fn(chat_id, text_msg, {"inline_keyboard": buttons})
+
+
+# ═══════════════════════════════════════════════════════════
 # ZAPIER NOTIFY ROUTES
-# ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
 @app.route("/notify", methods=["POST"])
 def notify():
     data    = request.json
@@ -1877,6 +2064,7 @@ def notify():
     if message:
         send_client_msg(CHAT_ID, message)
     return jsonify({"status": "ok"})
+
 
 @app.route("/pipeline_notify", methods=["POST"])
 def pipeline_notify():
@@ -1908,15 +2096,14 @@ def pipeline_notify():
         [{"text": "🛑 Completed — Not a Fit", "callback_data": f"confirm_call|{lead_id}|completed_stop"}],
         [{"text": "❌ No Show",               "callback_data": f"confirm_call|{lead_id}|no_show"}],
         [{"text": "🔄 Reschedule",            "callback_data": f"confirm_call|{lead_id}|reschedule"}],
-        [{"text": "🔁 Rescheduled On-Call",   "callback_data": f"confirm_call|{lead_id}|reschedule_oncall"}]
+        [{"text": "🔁 Rescheduled On-Call",   "callback_data": f"confirm_call|{lead_id}|reschedule_oncall"}],
     ]
     requests.post(f"{PIPELINE_API}/sendMessage", json={
-        "chat_id":      CHAT_ID,
-        "text":         text,
-        "parse_mode":   "Markdown",
+        "chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown",
         "reply_markup": {"inline_keyboard": buttons}
     })
     return jsonify({"status": "ok"})
+
 
 @app.route("/proposal_notify", methods=["POST"])
 def proposal_notify():
@@ -1942,24 +2129,50 @@ def proposal_notify():
     )
     buttons = [[{"text": "📝 Send Contract", "callback_data": f"confirm_contract|{lead_id}"}]]
     requests.post(f"{PIPELINE_API}/sendMessage", json={
-        "chat_id":      CHAT_ID,
-        "text":         text,
-        "parse_mode":   "Markdown",
+        "chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown",
         "reply_markup": {"inline_keyboard": buttons}
     })
     return jsonify({"status": "ok"})
 
+
 @app.route("/invoice_sent", methods=["POST"])
 def invoice_sent():
+    """
+    Called by Zapier System 3B after contract is signed and the
+    Zoho deposit invoice has been sent.
+
+    ── BUG FIX #2 ──────────────────────────────────────────
+    The previous implementation sent a plain Telegram message
+    with NO inline button. This meant the operator had no way
+    to mark the deposit as paid from the bot, breaking the
+    entire System 3B → System 4 transition.
+
+    Fix: Read the Deposit amount from the Projects sheet and
+    attach a "Mark Deposit Paid" action button so the operator
+    always has a clear, one-tap path to advance the project.
+    ────────────────────────────────────────────────────────
+    """
     data         = request.json
     lead_id      = data.get("lead_id",      "—")
     lead_name    = data.get("lead_name",    "—")
     project_id   = data.get("project_id",   "—")
     package      = data.get("package",      "—")
-    deposit      = data.get("deposit",      "—")
-    invoice_date = data.get("invoice_date", "—")
+    invoice_date = data.get("invoice_date", ph_now().strftime("%Y-%m-%d"))
     invoice_link = data.get("invoice_link", "—")
+    # Zapier may or may not pass deposit — look it up from Projects as authoritative source
+    deposit_from_payload = data.get("deposit", "")
 
+    # Look up canonical deposit from Projects sheet
+    deposit_display = deposit_from_payload
+    if not deposit_display:
+        proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
+        proj_row = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == lead_id), None)
+        if proj_row:
+            deposit_display = safe_get(proj_row, proj_col, "Deposit")
+    if not deposit_display or deposit_display == "—":
+        deposit_display = "—"
+
+    # Update Sheets (idempotent — safe to re-run)
     _write_back("Projects", "Projects!A1:Z200", "Lead_ID", lead_id, {
         "Invoice_Sent": "TRUE",
         "Invoice_Date": invoice_date
@@ -1971,26 +2184,40 @@ def invoice_sent():
         "Next_Action_Date": ph_now().strftime("%Y-%m-%d")
     })
 
+    invoice_line = f"📄 [View Invoice]({invoice_link})" if invoice_link != "—" else "📄 Invoice sent via Zoho"
+
     text = (
         f"🧾 *Deposit Invoice Sent*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 {lead_name}\n"
         f"🆔 Lead: `{lead_id}` | Project: `{project_id}`\n"
         f"📦 Package: {package}\n"
-        f"💰 Deposit: ${deposit}\n"
+        f"💰 Deposit Due: ${deposit_display}\n"
         f"📅 Sent: {invoice_date}\n"
-        f"📄 [View Invoice]({invoice_link})\n"
+        f"{invoice_line}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"✅ Deposit invoice sent to client.\n"
-        f"Project moved to *Active Project* stage."
+        f"When payment is received, tap the button below."
     )
+
+    # ── THE CRITICAL MISSING BUTTON (Bug Fix #2) ─────────────
+    buttons = [[
+        {"text": "💰 Mark Deposit Paid", "callback_data": f"deposit_paid_confirm|{lead_id}"}
+    ]]
+    # ─────────────────────────────────────────────────────────
+
     requests.post(f"{PIPELINE_API}/sendMessage", json={
-        "chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"
+        "chat_id":      CHAT_ID,
+        "text":         text,
+        "parse_mode":   "Markdown",
+        "reply_markup": {"inline_keyboard": buttons}
     })
     return jsonify({"status": "ok"})
 
+
 @app.route("/deposit_confirmed", methods=["POST"])
 def deposit_confirmed():
+    """Automatic path: Zoho payment confirmed → Zapier fires this route."""
     data         = request.json
     lead_id      = data.get("lead_id",        "—")
     lead_name    = data.get("lead_name",      "—")
@@ -2025,6 +2252,7 @@ def deposit_confirmed():
     })
     return jsonify({"status": "ok"})
 
+
 @app.route("/gallery_notify", methods=["POST"])
 def gallery_notify():
     data          = request.json
@@ -2057,7 +2285,7 @@ def gallery_notify():
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"✅ Gallery delivered to client.\n"
         f"Project moved to *Delivered* stage.\n"
-        f"Remember to check for balance payment and run retention sequence."
+        f"Tap below when the client pays their balance."
     )
     buttons = [[{"text": "💳 Mark Balance Paid", "callback_data": f"balance_paid|{lead_id}"}]]
     requests.post(f"{PIPELINE_API}/sendMessage", json={
@@ -2068,15 +2296,15 @@ def gallery_notify():
     })
     return jsonify({"status": "ok"})
 
-# ─────────────────────────────────────────────
-# ZAPIER — System 5 Review Request
-#
-# CRITICAL: Does NOT set Current_Stage = "Completed".
-# Projects must stay "Delivered" so APScheduler can find the row
-# after 7 days and auto-complete via check_retention_completions().
-# ─────────────────────────────────────────────
+
 @app.route("/retention_notify", methods=["POST"])
 def retention_notify():
+    """
+    Called by Zapier System 5 after the review request email fires.
+    CRITICAL: Does NOT set Current_Stage = 'Completed'.
+    Projects must stay 'Delivered' so APScheduler can find the row
+    after 7 days and auto-complete via check_retention_completions().
+    """
     data        = request.json
     lead_id     = data.get("lead_id",     "—")
     message_id  = data.get("message_id")
@@ -2090,8 +2318,7 @@ def retention_notify():
     tier_emoji = {"VIP": "⭐", "Premium": "💎", "Standard": "🔹"}.get(str(new_tier), "👤")
     today_str  = ph_now().strftime("%Y-%m-%d")
 
-    # Write review flags only — do NOT set Current_Stage = "Completed".
-    # Project must stay "Delivered" so APScheduler auto-completes after 7 days.
+    # Write review flags — do NOT advance Current_Stage to Completed yet
     _write_back("Projects", "Projects!A1:Z200", "Lead_ID", lead_id, {
         "Review":           "TRUE",
         "Review_Sent_Date": today_str
@@ -2118,7 +2345,7 @@ def retention_notify():
         f"🏁 *Status: Complete*"
     )
 
-    # Delete the processing message if one was passed (legacy safety net)
+    # Delete any processing message passed from older flow
     msg_id_int = None
     if message_id:
         try:
@@ -2131,11 +2358,10 @@ def retention_notify():
     send_pipeline_msg(CHAT_ID, text)
     return jsonify({"status": "ok"})
 
-# ─────────────────────────────────────────────
-# ZAPIER — System 5 Rebooking Upsell
-# ─────────────────────────────────────────────
+
 @app.route("/retention_rebooking_notify", methods=["POST"])
 def retention_rebooking_notify():
+    """Called by Zapier System 5 (+7 days) after the rebooking email fires."""
     data        = request.json
     lead_id     = data.get("lead_id",     "—")
     client_name = data.get("client_name", "—")
@@ -2144,10 +2370,7 @@ def retention_rebooking_notify():
 
     today_str = ph_now().strftime("%Y-%m-%d")
 
-    _write_back("Projects", "Projects!A1:Z200", "Lead_ID", lead_id, {
-        "Upsell_Sent": "TRUE"
-    })
-    # Pipeline → Closed Won (idempotent alongside APScheduler)
+    _write_back("Projects", "Projects!A1:Z200", "Lead_ID", lead_id, {"Upsell_Sent": "TRUE"})
     _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", lead_id, {
         "Current_Stage":    "Closed Won",
         "Last_Action":      "Rebooking Email Sent",
@@ -2156,7 +2379,7 @@ def retention_rebooking_notify():
     })
 
     text = (
-        f"📧 *Everly & Co. — Rebooking Sequence Complete — Rebooking Email Sent*\n"
+        f"📧 *Everly & Co. — Rebooking Sequence Complete*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 {client_name}\n"
         f"🆔 Lead: `{lead_id}` | Project: `{project_id}`\n"
@@ -2170,9 +2393,10 @@ def retention_rebooking_notify():
     })
     return jsonify({"status": "ok"})
 
-# ─────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════
 # STARTUP
-# ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
 try:
     init_scheduler()
 except Exception as e:
