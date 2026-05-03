@@ -116,9 +116,6 @@ def write_sheet(range_name, values):
         return False
 
 def _write_back(sheet_name, range_name, lookup_col_name, lookup_value, updates):
-    """
-    Helper to write back updates to a Google Sheet based on a lookup value.
-    """
     rows, col = read_sheet_with_headers(range_name)
     found_row_idx = -1
     for i, row in enumerate(rows):
@@ -131,7 +128,7 @@ def _write_back(sheet_name, range_name, lookup_col_name, lookup_value, updates):
         return False
 
     target_row = rows[found_row_idx]
-    updated_values = [v for v in target_row]  # Make a copy
+    updated_values = [v for v in target_row]
 
     for key, value in updates.items():
         if key in col:
@@ -262,17 +259,12 @@ def smart_send(chat_id, text, markup=None, msg_id=None, use_pipeline=False):
             return send_msg(chat_id, text, markup)
 
 # ─────────────────────────────────────────────
-# FIX 1 — CONFIG HELPERS
+# CONFIG HELPERS
 # Config sheet layout:
 #   A1: last_lead_number  B1: padded   C1: briefing_time (label)
 #   A2: <counter>         B2: <padded> C2: <HH:MM value>
-#
-# Old code looked for a "Key"/"Value" column structure that doesn't exist,
-# causing it to append garbage rows every time. Now reads/writes a single
-# dedicated cell: Config!C2.
 # ─────────────────────────────────────────────
 def get_briefing_time():
-    """Read briefing time from Config!C2. Returns '09:00' if unset."""
     try:
         service = get_sheets_service()
         result = service.spreadsheets().values().get(
@@ -287,14 +279,8 @@ def get_briefing_time():
     return "09:00"
 
 def write_briefing_time(time_str):
-    """
-    Write briefing time to Config!C2.
-    Also stamps the label 'briefing_time' in C1 the first time so the
-    sheet stays self-documenting.
-    """
     try:
         service = get_sheets_service()
-        # Check whether C1 already has a label; write it once if missing
         check = service.spreadsheets().values().get(
             spreadsheetId=SPREADSHEET_ID,
             range="Config!C1"
@@ -505,7 +491,7 @@ def send_daily_briefing():
         stage = safe_get(r, proj_col, "Current_Stage")
         if stage != "Delivered":
             continue
-        review_sent = safe_get(r, proj_col, "Review")          # correct column
+        review_sent = safe_get(r, proj_col, "Review")
         if review_sent and review_sent.upper() == "TRUE":
             continue
         delivery_str = safe_get(r, proj_col, "Delivery_Date")
@@ -933,12 +919,6 @@ def _show_lead(chat_id, msg_id, lead_id, use_pipeline=False):
     ]
     smart_send(chat_id, text, {"inline_keyboard": buttons}, msg_id, use_pipeline)
 
-# ─────────────────────────────────────────────
-# FIX 2 — _show_pipeline
-# Removed the non-existent `Contract_Status` column.
-# Now shows Proposal_Doc_Url, Proposal_Sent_Date, Proposal_Status which are
-# the actual columns in the Pipeline Tracker sheet.
-# ─────────────────────────────────────────────
 def _show_pipeline(chat_id, msg_id, lead_id, use_pipeline=False):
     pipe_rows, pipe_col = read_sheet_with_headers("Pipeline Tracker!A1:L200")
     pipe_row = next((r for r in pipe_rows if safe_get(r, pipe_col, "Lead_ID") == lead_id), None)
@@ -953,11 +933,10 @@ def _show_pipeline(chat_id, msg_id, lead_id, use_pipeline=False):
     next_action      = safe_get(pipe_row, pipe_col, "Next_Action")
     next_action_date = safe_get(pipe_row, pipe_col, "Next_Action_Date")
     call_status      = safe_get(pipe_row, pipe_col, "Call_Status")
-    proposal_status  = safe_get(pipe_row, pipe_col, "Proposal_Status")       # ✅ correct
-    proposal_doc_url = safe_get(pipe_row, pipe_col, "Proposal_Doc_Url")      # ✅ correct
-    proposal_sent    = safe_get(pipe_row, pipe_col, "Proposal_Sent_Date")    # ✅ correct
+    proposal_status  = safe_get(pipe_row, pipe_col, "Proposal_Status")
+    proposal_doc_url = safe_get(pipe_row, pipe_col, "Proposal_Doc_Url")
+    proposal_sent    = safe_get(pipe_row, pipe_col, "Proposal_Sent_Date")
 
-    # Build proposal line with link when available
     if proposal_doc_url != "—":
         proposal_line = f"[View Proposal]({proposal_doc_url}) — {proposal_status} ({proposal_sent})"
     elif proposal_status != "—":
@@ -1000,13 +979,13 @@ def _show_project(chat_id, msg_id, lead_id, use_pipeline=False):
     project_id       = safe_get(proj_row, proj_col, "Project_ID")
     current_stage    = safe_get(proj_row, proj_col, "Current_Stage")
     package          = safe_get(proj_row, proj_col, "Package")
-    total_value      = safe_get(proj_row, proj_col, "Total_Price")        # correct column
+    total_value      = safe_get(proj_row, proj_col, "Total_Price")
     deposit_paid     = safe_get(proj_row, proj_col, "Deposit_Paid")
     balance          = safe_get(proj_row, proj_col, "Balance")
     balance_due_date = safe_get(proj_row, proj_col, "Balance_Due_Date")
-    gallery_link     = safe_get(proj_row, proj_col, "Gallery_Folder_URL") # correct column
+    gallery_link     = safe_get(proj_row, proj_col, "Gallery_Folder_URL")
     delivery_date    = safe_get(proj_row, proj_col, "Delivery_Date")
-    review_sent      = safe_get(proj_row, proj_col, "Review")             # correct column
+    review_sent      = safe_get(proj_row, proj_col, "Review")
     upsell_sent      = safe_get(proj_row, proj_col, "Upsell_Sent")
 
     deposit_label = "✅ Yes" if deposit_paid.upper() == "TRUE" else "❌ No"
@@ -1041,11 +1020,6 @@ def _show_project(chat_id, msg_id, lead_id, use_pipeline=False):
 
     smart_send(chat_id, text, {"inline_keyboard": buttons}, msg_id, use_pipeline)
 
-# ─────────────────────────────────────────────
-# FIX 4 — _show_client (was a stub, now fully implemented)
-# Reads from the Clients sheet:
-#   Client_ID | Name | Email | Phone | Created_At | LTV | Bookings | Client_Tier
-# ─────────────────────────────────────────────
 def _show_client(chat_id, msg_id, client_id, method="edit", use_pipeline=False):
     client_rows, client_col = read_sheet_with_headers("Clients!A1:H200")
     client_row = next(
@@ -1081,7 +1055,6 @@ def _show_client(chat_id, msg_id, client_id, method="edit", use_pipeline=False):
         f"━━━━━━━━━━━━━━━━━━━━"
     )
 
-    # Find any active project for this client to offer quick nav
     proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
     buttons = []
     for r in proj_rows:
@@ -1176,7 +1149,7 @@ def _confirm_contract(chat_id, msg_id, lead_id, use_pipeline=False):
     smart_send(chat_id, text, {"inline_keyboard": buttons}, msg_id, use_pipeline)
 
 # ─────────────────────────────────────────────
-# CLIENT STATS — calculates LTV / Tier / Bookings
+# CLIENT STATS
 # ─────────────────────────────────────────────
 def _update_client_stats(lead_id):
     lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T500")
@@ -1213,7 +1186,7 @@ def _update_client_stats(lead_id):
         if stage in ("Closed Lost",):
             continue
         total_bookings += 1
-        total_val_raw = safe_get(row, proj_col, "Total_Price")          # correct column
+        total_val_raw = safe_get(row, proj_col, "Total_Price")
         total_val_str = total_val_raw.replace("$", "").replace(",", "").strip()
         try:
             if total_val_str and (total_val_str[0].isdigit() or
@@ -1231,10 +1204,7 @@ def _update_client_stats(lead_id):
     return {"ltv": int(total_ltv), "tier": tier, "bookings": total_bookings}
 
 # ─────────────────────────────────────────────
-# FIX 3 — _execute_retention
-# Now writes LTV / Bookings / Client_Tier back to the Clients sheet
-# (previously stats were calculated but only sent to Telegram, never saved).
-# Lookup is by Email; falls back to Client_ID from the Leads row.
+# EXECUTE RETENTION
 # ─────────────────────────────────────────────
 def _execute_retention(lead_id, processing_msg_id=None):
     lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
@@ -1257,8 +1227,6 @@ def _execute_retention(lead_id, processing_msg_id=None):
     new_tier = stats["tier"]
     bookings = stats["bookings"]
 
-    # ── Write updated stats back to the Clients sheet ──────────────────────
-    # Match by Email first; fall back to Client_ID if email not available.
     try:
         client_rows, client_col = read_sheet_with_headers("Clients!A1:H200")
         target_client = None
@@ -1270,7 +1238,6 @@ def _execute_retention(lead_id, processing_msg_id=None):
                 None
             )
 
-        # Fallback: match by Client_ID stored on the lead row
         if not target_client:
             client_id_on_lead = safe_get(lead_row, lead_col, "Client_ID")
             if client_id_on_lead != "—":
@@ -1295,7 +1262,6 @@ def _execute_retention(lead_id, processing_msg_id=None):
 
     today_str = ph_now().strftime("%Y-%m-%d")
 
-    # Pipeline Tracker → Retention stage
     _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", lead_id, {
         "Current_Stage":    "Retention",
         "Last_Action":      "Review Request Sent",
@@ -1325,6 +1291,47 @@ def _execute_retention(lead_id, processing_msg_id=None):
         "bookings":     bookings,
         "message_id":   processing_msg_id
     }
+
+# ─────────────────────────────────────────────
+# FIX: _execute_deliver_gallery
+# Was referenced by the deliver_gallery_confirm callback but never defined.
+# Writes project/pipeline updates and fires the DELIVER_GALLERY_WEBHOOK.
+# ─────────────────────────────────────────────
+def _execute_deliver_gallery(chat_id, msg_id, lead_id, cb_id, use_pipeline=False):
+    proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
+    proj_row    = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == lead_id), None)
+    client_name = safe_get(proj_row, proj_col, "Client_Name") if proj_row else "—"
+    project_id  = safe_get(proj_row, proj_col, "Project_ID")  if proj_row else "—"
+    today_str   = ph_now().strftime("%Y-%m-%d")
+
+    _write_back("Projects", "Projects!A1:Z200", "Lead_ID", lead_id, {
+        "Current_Stage": "Post-Production",
+        "Shoot_Complete": "TRUE"
+    })
+    _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", lead_id, {
+        "Current_Stage":    "Active Project",
+        "Last_Action":      "Shoot Completed — Gallery in Progress",
+        "Next_Action":      "Deliver Gallery",
+        "Next_Action_Date": today_str
+    })
+
+    fired = fire_webhook(DELIVER_GALLERY_WEBHOOK, {
+        "lead_id":     lead_id,
+        "project_id":  project_id,
+        "client_name": client_name
+    })
+
+    answer_callback(cb_id, "📸 Gallery delivery triggered!", use_pipeline)
+    text = (
+        f"📸 *Gallery Delivery Triggered*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 {client_name}\n"
+        f"🆔 Lead: `{lead_id}` | Project: `{project_id}`\n"
+        f"📅 {today_str}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{'✅ Webhook fired — gallery delivery sequence started.' if fired else '⚠️ Webhook failed — check DELIVER_GALLERY_WEBHOOK in Railway.'}"
+    )
+    smart_send(chat_id, text, msg_id=msg_id, use_pipeline=use_pipeline)
 
 # ─────────────────────────────────────────────
 # SHARED CALLBACK HANDLER
@@ -1537,12 +1544,18 @@ def handle_callbacks(data, use_pipeline=False):
     elif action == "deliver_gallery_confirm":
         _execute_deliver_gallery(chat_id, msg_id, target_id, cb["id"], use_pipeline=use_pipeline)
 
+    # ─────────────────────────────────────────────
+    # FIX: balance_paid — Send NEW message so the
+    # System 4 Gallery Delivered notification stays
+    # intact in the pipeline bot.
+    # ─────────────────────────────────────────────
     elif action == "balance_paid":
         proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
         proj_row    = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == target_id), None)
         client_name = safe_get(proj_row, proj_col, "Client_Name")     if proj_row else "—"
         balance     = safe_get(proj_row, proj_col, "Balance")          if proj_row else "—"
         due_date    = safe_get(proj_row, proj_col, "Balance_Due_Date") if proj_row else "—"
+        answer_callback(cb["id"], "Confirm balance payment below 👇", use_pipeline)
         text = (
             f"💳 *Confirm Balance Paid*\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -1555,8 +1568,14 @@ def handle_callbacks(data, use_pipeline=False):
             {"text": "✅ Yes — Mark Paid", "callback_data": f"balance_paid_confirm|{target_id}"},
             {"text": "❌ Cancel",           "callback_data": f"view_project|{target_id}"}
         ]]
-        smart_send(chat_id, text, {"inline_keyboard": buttons}, msg_id=msg_id, use_pipeline=use_pipeline)
+        # Send as NEW message — preserves the Gallery Delivered notification above it
+        send_pipeline_msg(CHAT_ID, text, {"inline_keyboard": buttons})
 
+    # ─────────────────────────────────────────────
+    # FIX: balance_paid_confirm — Send NEW message
+    # so both the Gallery Delivered notification and
+    # the Balance Paid confirmation stay visible.
+    # ─────────────────────────────────────────────
     elif action == "balance_paid_confirm":
         today_str   = ph_now().strftime("%Y-%m-%d")
         proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
@@ -1575,7 +1594,7 @@ def handle_callbacks(data, use_pipeline=False):
         })
         answer_callback(cb["id"], "💰 Balance marked as paid!", use_pipeline)
         text = (
-            f"💰 *Balance Confirmed Paid*\n"
+            f"✅ *System 4 — Balance Paid*\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"👤 {client_name}\n"
             f"🆔 Lead: `{target_id}` | Project: `{project_id}`\n"
@@ -1586,7 +1605,8 @@ def handle_callbacks(data, use_pipeline=False):
             f"Ready to send the retention sequence to the client?"
         )
         buttons = [[{"text": "⭐ Run Retention", "callback_data": f"trigger_retention_confirm|{target_id}"}]]
-        smart_send(chat_id, text, {"inline_keyboard": buttons}, msg_id=msg_id, use_pipeline=use_pipeline)
+        # Send as NEW message — preserves all previous System 4 notifications
+        send_pipeline_msg(CHAT_ID, text, {"inline_keyboard": buttons})
 
     elif action == "trigger_retention_confirm":
         proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
@@ -1991,10 +2011,10 @@ def gallery_notify():
     delivery_date = data.get("delivery_date", "—")
 
     _write_back("Projects", "Projects!A1:Z200", "Lead_ID", lead_id, {
-        "Current_Stage":    "Delivered",
-        "Gallery_Folder_URL": gallery_link,     # correct column
-        "Delivery_Date":    delivery_date,
-        "Shoot_Complete":   "TRUE"
+        "Current_Stage":      "Delivered",
+        "Gallery_Folder_URL": gallery_link,
+        "Delivery_Date":      delivery_date,
+        "Shoot_Complete":     "TRUE"
     })
     _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", lead_id, {
         "Current_Stage":    "Delivered",
@@ -2004,7 +2024,7 @@ def gallery_notify():
     })
 
     text = (
-        f"📸 *Gallery Delivered*\n"
+        f"📸 *System 4 — Gallery Delivered*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 {client_name}\n"
         f"🆔 Lead: `{lead_id}` | Project: `{project_id}`\n"
@@ -2041,7 +2061,7 @@ def retention_notify():
     today_str  = ph_now().strftime("%Y-%m-%d")
 
     _write_back("Projects", "Projects!A1:Z200", "Lead_ID", lead_id, {
-        "Review":           "TRUE",             # correct column
+        "Review":           "TRUE",
         "Review_Sent_Date": today_str
     })
     _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", lead_id, {
