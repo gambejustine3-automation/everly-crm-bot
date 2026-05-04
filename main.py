@@ -1698,7 +1698,7 @@ def handle_callbacks(data, use_pipeline=False):
             f"✅ *Confirmed — deposit marked as paid.*"
         ))
 
-        # Send fresh success card.
+        # Send fresh success card with System 4 trigger button.
         send_pipeline_msg(CHAT_ID, (
             f"💰 *Deposit Payment Confirmed — System 3C*\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -1710,11 +1710,111 @@ def handle_callbacks(data, use_pipeline=False):
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
             f"✅ Deposit confirmed paid.\n"
             f"Project moved to *Pre-Production* stage.\n"
-            f"Pre-production workflow is now unlocked."
-        ))
+            f"Pre-production workflow is now unlocked.\n\n"
+            f"When the shoot is done, tap below to trigger gallery delivery."
+        ), {"inline_keyboard": [[
+            {"text": "🎬 Trigger System 4 — Gallery Delivery", "callback_data": f"trigger_system4_confirm|{target_id}"}
+        ]]})
 
     elif action == "deliver_gallery_confirm":
         _execute_deliver_gallery(chat_id, msg_id, target_id, cb["id"], use_pipeline=use_pipeline)
+
+    # ── System 4: Step 1 of 2 — Confirmation prompt ──────────────────────────
+    # The operator taps "Trigger System 4" on the System 3C card.
+    # We show a clear confirmation dialog before doing anything irreversible.
+    elif action == "trigger_system4_confirm":
+        proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
+        proj_row    = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == target_id), None)
+        client_name = safe_get(proj_row, proj_col, "Client_Name") if proj_row else "—"
+        project_id  = safe_get(proj_row, proj_col, "Project_ID")  if proj_row else "—"
+        event_date  = safe_get(proj_row, proj_col, "Event_Date")  if proj_row else "—"
+
+        answer_callback(cb["id"], "Confirm gallery delivery below 👇", use_pipeline)
+        text = (
+            f"🎬 *Confirm — Trigger System 4 Gallery Delivery*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 *{client_name}*\n"
+            f"🆔 Lead: `{target_id}` | Project: `{project_id}`\n"
+            f"📅 Event Date: {event_date}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"This will:\n"
+            f"  • Mark shoot as complete in Google Sheets\n"
+            f"  • Move project to Post-Production stage\n"
+            f"  • Send the gallery delivery email to the client\n"
+            f"  • Create the balance payment invoice in Zoho\n\n"
+            f"⚠️ Only tap *Yes* after the shoot is fully done.\n"
+            f"This action cannot be undone."
+        )
+        buttons = [
+            [{"text": "✅ Yes — Trigger Gallery Delivery", "callback_data": f"trigger_system4_execute|{target_id}|{msg_id}"}],
+            [{"text": "❌ Cancel — Not Ready Yet",          "callback_data": f"none"}]
+        ]
+        send_pipeline_msg(CHAT_ID, text, {"inline_keyboard": buttons})
+
+    # ── System 4: Step 2 of 2 — Execute ──────────────────────────────────────
+    # Operator confirmed. Fire the webhook, remove buttons from BOTH the
+    # System 3C card and the confirmation dialog so neither can be re-pressed.
+    elif action == "trigger_system4_execute":
+        system3c_msg_id = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+
+        proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
+        proj_row    = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == target_id), None)
+        client_name = safe_get(proj_row, proj_col, "Client_Name") if proj_row else "—"
+        project_id  = safe_get(proj_row, proj_col, "Project_ID")  if proj_row else "—"
+        today_str   = ph_now().strftime("%Y-%m-%d")
+
+        # Write Sheets first before firing webhook.
+        _write_back("Projects", "Projects!A1:Z200", "Lead_ID", target_id, {
+            "Current_Stage":  "Post-Production",
+            "Shoot_Complete": "TRUE"
+        })
+        _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", target_id, {
+            "Current_Stage":    "Active Project",
+            "Last_Action":      "Shoot Completed — Gallery in Progress",
+            "Next_Action":      "Deliver Gallery",
+            "Next_Action_Date": today_str
+        })
+
+        fired = fire_webhook(DELIVER_GALLERY_WEBHOOK, {
+            "lead_id":     target_id,
+            "project_id":  project_id,
+            "client_name": client_name
+        })
+
+        answer_callback(cb["id"], "🎬 System 4 triggered!", use_pipeline)
+
+        # Lock the System 3C card — remove the trigger button so it cannot be pressed again.
+        if system3c_msg_id:
+            edit_pipeline_msg(chat_id, system3c_msg_id, (
+                f"💰 *Deposit Payment Confirmed — System 3C*\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 *{client_name}*\n"
+                f"🆔 Lead: `{target_id}` | Project: `{project_id}`\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"✅ Deposit confirmed paid.\n"
+                f"🎬 Gallery delivery triggered — {today_str}"
+            ))
+
+        # Lock the confirmation dialog — strip its buttons.
+        edit_pipeline_msg(chat_id, msg_id, (
+            f"🎬 *Confirm — Trigger System 4 Gallery Delivery*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 {client_name} | Lead: `{target_id}`\n\n"
+            f"✅ *Confirmed — gallery delivery sequence triggered.*"
+        ))
+
+        # Send result card.
+        send_pipeline_msg(CHAT_ID, (
+            f"🎬 *System 4 — Gallery Delivery Triggered*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 *{client_name}*\n"
+            f"🆔 Lead: `{target_id}` | Project: `{project_id}`\n"
+            f"📅 Triggered: {today_str}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"{'✅ Webhook fired — gallery delivery email is on its way to the client.' if fired else '⚠️ Webhook failed — check DELIVER_GALLERY_WEBHOOK in Railway.'}\n\n"
+            f"📊 Project → *Post-Production*\n"
+            f"A balance payment invoice will be created in Zoho automatically."
+        ))
 
     elif action == "balance_paid":
         proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
