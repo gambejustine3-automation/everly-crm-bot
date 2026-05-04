@@ -1724,10 +1724,16 @@ def handle_callbacks(data, use_pipeline=False):
     # We show a clear confirmation dialog before doing anything irreversible.
     elif action == "trigger_system4_confirm":
         proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
-        proj_row    = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == target_id), None)
-        client_name = safe_get(proj_row, proj_col, "Client_Name") if proj_row else "—"
-        project_id  = safe_get(proj_row, proj_col, "Project_ID")  if proj_row else "—"
-        event_date  = safe_get(proj_row, proj_col, "Event_Date")  if proj_row else "—"
+        proj_row         = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == target_id), None)
+        client_name      = safe_get(proj_row, proj_col, "Client_Name")        if proj_row else "—"
+        project_id       = safe_get(proj_row, proj_col, "Project_ID")         if proj_row else "—"
+        event_date       = safe_get(proj_row, proj_col, "Event_Date")         if proj_row else "—"
+        balance_due_date = safe_get(proj_row, proj_col, "Balance_Due_Date")   if proj_row else "—"
+        gallery_url      = safe_get(proj_row, proj_col, "Gallery_Folder_URL") if proj_row else "—"
+
+        # Warn the operator if critical fields are missing before they confirm.
+        gallery_status = f"[View Folder]({gallery_url})" if gallery_url != "—" else "⚠️ Not set — check System 3B sent gallery folder url"
+        due_status     = balance_due_date if balance_due_date != "—" else "⚠️ Not set — check System 3B sent due date"
 
         answer_callback(cb["id"], "Confirm gallery delivery below 👇", use_pipeline)
         text = (
@@ -1736,6 +1742,8 @@ def handle_callbacks(data, use_pipeline=False):
             f"👤 *{client_name}*\n"
             f"🆔 Lead: `{target_id}` | Project: `{project_id}`\n"
             f"📅 Event Date: {event_date}\n"
+            f"📁 Gallery Folder: {gallery_status}\n"
+            f"💳 Balance Due Date: {due_status}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
             f"This will:\n"
             f"  • Mark shoot as complete in Google Sheets\n"
@@ -2285,20 +2293,32 @@ def proposal_notify():
 # include the Zoho invoice URL. The rest of the card is fully functional.
 @app.route("/invoice_sent", methods=["POST"])
 def invoice_sent():
-    data         = request.json
-    lead_id      = data.get("lead_id",      "—")
-    lead_name    = data.get("lead_name",    "—")
-    project_id   = data.get("project_id",   "—")
-    package      = data.get("package",      "—")
-    deposit      = data.get("deposit",      "—")
-    invoice_date = data.get("invoice_date", "—")
-    invoice_link = data.get("invoice_link", "—")
-    due_date     = data.get("due_date",     "—")
+    data               = request.json
+    lead_id            = data.get("lead_id",            "—")
+    lead_name          = data.get("lead_name",          "—")
+    project_id         = data.get("project_id",         "—")
+    package            = data.get("package",            "—")
+    deposit            = data.get("deposit",            "—")
+    invoice_date       = data.get("invoice_date",       "—")
+    invoice_link       = data.get("invoice_link",       "—")
+    due_date           = data.get("due_date",           "—")
+    # FIX: System 3B provisions the Google Drive gallery folder and sends its URL here.
+    # Previously ignored — left Gallery_Folder_URL blank so System 4 sent "—" to Zapier.
+    gallery_folder_url = data.get("gallery_folder_url", "—")
 
-    _write_back("Projects", "Projects!A1:Z200", "Lead_ID", lead_id, {
+    # Build Projects update — write Balance_Due_Date and Gallery_Folder_URL when present.
+    # Balance_Due_Date was never written before → Zoho received no date on the balance
+    # invoice → defaulted to a past date → "14 days overdue" notice fired immediately.
+    projects_update = {
         "Invoice_Sent": "TRUE",
         "Invoice_Date": invoice_date
-    })
+    }
+    if due_date and due_date != "—":
+        projects_update["Balance_Due_Date"] = due_date
+    if gallery_folder_url and gallery_folder_url != "—":
+        projects_update["Gallery_Folder_URL"] = gallery_folder_url
+
+    _write_back("Projects", "Projects!A1:Z200", "Lead_ID", lead_id, projects_update)
     _write_back("Pipeline Tracker", "Pipeline Tracker!A1:L200", "Lead_ID", lead_id, {
         "Current_Stage":    "Active Project",
         "Last_Action":      "Deposit Invoice Sent",
