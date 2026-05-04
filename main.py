@@ -132,6 +132,19 @@ def write_sheet(range_name, values):
     except Exception as e:
         print(f"[WRITE ERROR] {range_name}: {e}")
         return False
+        
+def write_sheet_formula(range_name, values):
+    """Write formulas using USER_ENTERED so =TEXT() formulas are interpreted."""
+    try:
+        service = get_sheets_service()
+        service.spreadsheets().values().update(
+            spreadsheetId=SPREADSHEET_ID, range=range_name,
+            valueInputOption="USER_ENTERED", body={"values": values}
+        ).execute()
+        return True
+    except Exception as e:
+        print(f"[WRITE FORMULA ERROR] {range_name}: {e}")
+        return False
 
 def _write_back(sheet_name, range_name, lookup_col_name, lookup_value, updates):
     rows, col = read_sheet_with_headers(range_name)
@@ -1437,7 +1450,7 @@ def handle_callbacks(data, use_pipeline=False):
 
     elif action == "admin_reset_counter_execute":
         write_sheet("Config!A2", [[0]])
-        write_sheet("Config!B2", [["0001"]])
+        write_sheet_formula("Config!B2", [['=TEXT(A2,"0000")']])
         answer_callback(cb["id"], "✅ Counter reset!", use_pipeline)
         smart_send(chat_id, "✅ Lead counter reset to 0. Next lead will be LED-0001.", None, msg_id, use_pipeline)
 
@@ -2076,7 +2089,7 @@ def dashboard():
                 send_msg(chat_id, f"❌ Lead {lead_id} not found.")
         elif text == "/resetleadcounter":
             write_sheet("Config!A2", [[0]])
-            write_sheet("Config!B2", [["0001"]])
+            write_sheet_formula("Config!B2", [['=TEXT(A2,"0000")']])
             send_msg(chat_id, "✅ Lead counter reset to 0. Next lead will be LED-0001.")
         elif text.startswith("/retention"):
             parts = text.split()
