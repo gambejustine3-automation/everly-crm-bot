@@ -1757,11 +1757,19 @@ def handle_callbacks(data, use_pipeline=False):
     elif action == "trigger_system4_execute":
         system3c_msg_id = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
 
+        # Read Projects sheet for all fields Zapier s4.json step 1 needs.
         proj_rows, proj_col = read_sheet_with_headers("Projects!A1:Z200")
-        proj_row    = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == target_id), None)
-        client_name = safe_get(proj_row, proj_col, "Client_Name") if proj_row else "—"
-        project_id  = safe_get(proj_row, proj_col, "Project_ID")  if proj_row else "—"
-        today_str   = ph_now().strftime("%Y-%m-%d")
+        proj_row         = next((r for r in proj_rows if safe_get(r, proj_col, "Lead_ID") == target_id), None)
+        client_name      = safe_get(proj_row, proj_col, "Client_Name")      if proj_row else "—"
+        project_id       = safe_get(proj_row, proj_col, "Project_ID")       if proj_row else "—"
+        gallery_url      = safe_get(proj_row, proj_col, "Gallery_Folder_URL") if proj_row else "—"
+        balance_due_date = safe_get(proj_row, proj_col, "Balance_Due_Date") if proj_row else "—"
+        today_str        = ph_now().strftime("%Y-%m-%d")
+
+        # Read Leads sheet for client email (used by Zapier step 4 — send gallery email).
+        lead_rows, lead_col = read_sheet_with_headers("Leads!A1:T200")
+        lead_row     = next((r for r in lead_rows if safe_get(r, lead_col, "Lead_ID") == target_id), None)
+        client_email = safe_get(lead_row, lead_col, "Email") if lead_row else "—"
 
         # Write Sheets first before firing webhook.
         _write_back("Projects", "Projects!A1:Z200", "Lead_ID", target_id, {
@@ -1775,10 +1783,20 @@ def handle_callbacks(data, use_pipeline=False):
             "Next_Action_Date": today_str
         })
 
+        # Send ALL fields the s4.json Zapier zap references via {{1__...}}.
+        # s4.json step 6 posts to /gallery_notify using:
+        #   lead_id, lead_name, project_id, gallery_url, delivery_date
+        # s4.json step 4 (email) uses: client_name, client_email, gallery_url
+        # s4.json step 5 (Zoho invoice) uses: balance_due_date
         fired = fire_webhook(DELIVER_GALLERY_WEBHOOK, {
-            "lead_id":     target_id,
-            "project_id":  project_id,
-            "client_name": client_name
+            "lead_id":          target_id,
+            "lead_name":        client_name,      # Zapier uses {{1__lead_name}}
+            "client_name":      client_name,      # Zapier step 4 email uses {{1__client_name}}
+            "client_email":     client_email,     # Zapier step 4 email uses {{1__client_email}}
+            "project_id":       project_id,
+            "gallery_url":      gallery_url,      # Zapier uses {{1__gallery_url}}
+            "delivery_date":    today_str,        # Zapier uses {{1__delivery_date}}
+            "balance_due_date": balance_due_date  # Zapier step 5 invoice uses {{1__balance_due_date}}
         })
 
         answer_callback(cb["id"], "🎬 System 4 triggered!", use_pipeline)
