@@ -1532,7 +1532,7 @@ def handle_callbacks(data, use_pipeline=False):
             )
             smart_send(chat_id, prompt_text, None, msg_id, use_pipeline)
         else:
-            fired = fire_webhook(CONTRACT_ZAPIER_WEBHOOK, {"lead_id": target_id})
+            fired = fire_webhook(CONTRACT_ZAPIER_WEBHOOK, {"lead_id": target_id, "budget":  budget})
             answer_callback(cb["id"], "✅ Contract triggered", use_pipeline)
             confirmed_text = (
                 f"✅ *Contract Triggered — System 3A*\n"
@@ -1568,7 +1568,6 @@ def handle_callbacks(data, use_pipeline=False):
         deposit = round(total * 0.30)
         balance = total - deposit
 
-        _write_back("Leads", "Leads!A1:T200", "Lead_ID", lead_id, {"Budget": str(total)})
         _write_back("Projects", "Projects!A1:Z200", "Lead_ID", lead_id, {
             "Total_Price": str(total),
             "Deposit":     str(deposit),
