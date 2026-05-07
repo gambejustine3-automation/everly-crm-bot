@@ -1,0 +1,2509 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Everly & Co. — Automation Case Study</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+
+    /* ═══════════════════════════════════════════════════════════
+       DESIGN TOKENS
+       ─────────────────────────────────────────────────────────
+       Light, warm, premium consulting aesthetic.
+       Think: Apple for Business · Stripe Docs · Linear
+    ═══════════════════════════════════════════════════════════ */
+    :root {
+      /* Backgrounds */
+      --bg:         #EDD6B9;
+      --bg-card:    #F8EDD9;
+      --bg-subtle:  #E0C49E;
+      --bg-dark:    #1C1C24;
+      --bg-dark2:   #25252F;
+
+      /* Nav */
+      --nav-bg: rgba(237,214,185,0.92);
+
+      /* Closing / Footer */
+      --closing-bg:      #2A1C08;
+      --closing-text:    #F5F0E8;
+      --closing-lead:    rgba(245,240,232,0.65);
+      --footer-bg:       #1A1005;
+      --footer-text:     rgba(245,240,232,0.35);
+      --footer-link:     rgba(245,240,232,0.45);
+
+      /* Borders */
+      --border:       rgba(0,0,0,0.08);
+      --border-dark:  rgba(0,0,0,0.13);
+      --border-gold:  rgba(180,140,80,0.35);
+
+      /* Text */
+      --ink:       #18181F;
+      --ink-mid:   #4A4A58;
+      --ink-soft:  #7A7A8A;
+      --ink-faint: #B8B8C4;
+      --ink-inv:   #F5F4F0;
+
+      /* Accent */
+      --gold:        #B48C50;
+      --gold-light:  #D4AA70;
+      --gold-pale:   #F5EDD8;
+      --gold-subtle: rgba(180,140,80,0.10);
+
+      /* Semantic */
+      --green:   #2E8B6A;
+      --green-bg:#EDF7F3;
+      --red:     #C84040;
+      --red-bg:  #FDF0F0;
+      --blue:    #3B6EA8;
+      --blue-bg: #EEF4FF;
+
+      /* Type */
+      --serif: 'Libre Baskerville', Georgia, serif;
+      --sans:  'Plus Jakarta Sans', -apple-system, sans-serif;
+      --mono:  'JetBrains Mono', 'Courier New', monospace;
+
+      /* Spacing rhythm (8px base) */
+      --sp-1:  8px;
+      --sp-2:  16px;
+      --sp-3:  24px;
+      --sp-4:  32px;
+      --sp-5:  40px;
+      --sp-6:  56px;
+      --sp-8:  80px;
+      --sp-10: 112px;
+
+      /* Shadows */
+      --shadow-xs: 0 1px 3px rgba(0,0,0,0.07);
+      --shadow-sm: 0 2px 8px rgba(0,0,0,0.07), 0 1px 2px rgba(0,0,0,0.04);
+      --shadow-md: 0 4px 20px rgba(0,0,0,0.08), 0 2px 6px rgba(0,0,0,0.04);
+      --shadow-lg: 0 8px 40px rgba(0,0,0,0.09), 0 2px 8px rgba(0,0,0,0.05);
+
+      /* Radius */
+      --r-sm: 6px;
+      --r-md: 10px;
+      --r-lg: 16px;
+    }
+
+    /* ─── DARK MODE TOKENS ─── */
+    [data-theme="dark"] {
+      --bg:         #171716;
+      --bg-card:    #222220;
+      --bg-subtle:  #1C1C1A;
+      --bg-dark:    #0D0D0C;
+      --bg-dark2:   #111110;
+      --nav-bg:     rgba(23,23,22,0.93);
+
+      --border:       rgba(255,255,255,0.07);
+      --border-dark:  rgba(255,255,255,0.11);
+
+      --ink:       #F2EDE4;
+      --ink-mid:   #B8AF9E;
+      --ink-soft:  #7A7268;
+      --ink-faint: #524C44;
+      --ink-inv:   #F2EDE4;
+
+      --gold-pale:   rgba(180,140,80,0.18);
+      --green-bg:    rgba(46,139,106,0.18);
+      --red-bg:      rgba(200,64,64,0.18);
+      --blue-bg:     rgba(59,110,168,0.18);
+
+      --closing-bg:   #0D0D0C;
+      --closing-text: #F2EDE4;
+      --closing-lead: rgba(242,237,228,0.60);
+      --footer-bg:    #0A0A09;
+      --footer-text:  rgba(242,237,228,0.30);
+      --footer-link:  rgba(242,237,228,0.40);
+    }
+
+    /* ─── RESET ─── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--ink);
+      font-family: var(--sans);
+      font-size: 18px;
+      line-height: 1.65;
+      overflow-x: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ─── NAVIGATION ─── */
+    nav {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      z-index: 200;
+      height: 60px;
+      padding: 0 40px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: var(--nav-bg);
+      backdrop-filter: blur(16px);
+      border-bottom: 1px solid var(--border);
+      transition: box-shadow 0.3s;
+    }
+    nav.scrolled { box-shadow: var(--shadow-sm); }
+
+    .nav-brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .nav-logomark {
+      width: 30px; height: 30px;
+      background: var(--bg-dark);
+      border-radius: 6px;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .nav-logomark span {
+      font-family: var(--serif);
+      font-size: 14px;
+      color: var(--gold-light);
+      font-style: italic;
+    }
+    .nav-name {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--ink);
+      letter-spacing: -0.01em;
+    }
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .nav-links a {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--ink-mid);
+      text-decoration: none;
+      padding: 6px 12px;
+      border-radius: var(--r-sm);
+      transition: all 0.15s;
+    }
+    .nav-links a:hover { background: var(--bg-subtle); color: var(--ink); }
+    .nav-cta {
+      background: var(--bg-dark) !important;
+      color: var(--ink-inv) !important;
+      font-weight: 600 !important;
+    }
+    .nav-cta:hover { background: #2e2e38 !important; color: #fff !important; }
+
+    /* ─── LAYOUT ─── */
+    section { padding: var(--sp-10) 0; position: relative; }
+    section.compact { padding: var(--sp-8) 0; }
+
+    .container {
+      max-width: 1080px;
+      margin: 0 auto;
+      padding: 0 40px;
+    }
+    .container-wide {
+      max-width: 1320px;
+      margin: 0 auto;
+      padding: 0 40px;
+    }
+    .container-narrow {
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 0 40px;
+    }
+
+    /* ─── SECTION ANATOMY ─── */
+    .section-eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-family: var(--sans);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--gold);
+      margin-bottom: 16px;
+    }
+    .section-eyebrow::before {
+      content: '';
+      width: 20px; height: 2px;
+      background: var(--gold);
+      border-radius: 2px;
+    }
+
+    h1 {
+      font-family: var(--serif);
+      font-size: clamp(44px, 5vw, 68px);
+      font-weight: 700;
+      line-height: 1.08;
+      letter-spacing: -0.025em;
+      color: var(--ink);
+    }
+    h1 em { font-style: italic; font-weight: 400; color: var(--gold); }
+
+    h2 {
+      font-family: var(--serif);
+      font-size: clamp(32px, 3.5vw, 46px);
+      font-weight: 700;
+      line-height: 1.15;
+      letter-spacing: -0.02em;
+      color: var(--ink);
+      margin-bottom: 20px;
+    }
+    h2 em { font-style: italic; font-weight: 400; color: var(--gold); }
+
+    h3 {
+      font-family: var(--sans);
+      font-size: 19px;
+      font-weight: 700;
+      color: var(--ink);
+      margin-bottom: 10px;
+      line-height: 1.3;
+    }
+
+    .lead {
+      font-size: 19px;
+      line-height: 1.7;
+      color: var(--ink-mid);
+      max-width: 620px;
+    }
+
+    p { line-height: 1.75; }
+
+    /* ─── DIVIDER ─── */
+    .section-divider {
+      height: 1px;
+      background: var(--border);
+      margin: 0;
+    }
+
+    /* ═══════════════════════════════════════════════════════════
+       HERO
+    ═══════════════════════════════════════════════════════════ */
+    #hero {
+      padding-top: calc(60px + 72px);
+      padding-bottom: var(--sp-10);
+      background: var(--bg);
+      position: relative;
+      overflow: hidden;
+    }
+
+    /* Subtle warm texture for hero */
+    #hero::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background-image:
+        radial-gradient(ellipse 120% 80% at 60% -10%, rgba(180,140,80,0.07) 0%, transparent 60%),
+        radial-gradient(ellipse 80% 60% at -10% 50%, rgba(60,110,168,0.04) 0%, transparent 50%);
+      pointer-events: none;
+    }
+
+    .hero-inner {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 64px;
+      align-items: center;
+      position: relative;
+    }
+
+    .hero-text {}
+
+    .hero-badge-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--gold-pale);
+      border: 1px solid var(--border-gold);
+      border-radius: 100px;
+      padding: 6px 14px 6px 8px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--gold);
+      letter-spacing: 0.02em;
+      margin-bottom: 28px;
+      opacity: 0;
+      animation: fadeUp 0.7s ease forwards 0.1s;
+    }
+    .badge-dot {
+      width: 6px; height: 6px;
+      background: var(--gold);
+      border-radius: 50%;
+    }
+
+    h1 { opacity: 0; animation: fadeUp 0.7s ease forwards 0.25s; }
+
+    .hero-desc {
+      font-size: 19px;
+      line-height: 1.7;
+      color: var(--ink-mid);
+      max-width: 560px;
+      margin: 24px 0 40px;
+      opacity: 0;
+      animation: fadeUp 0.7s ease forwards 0.4s;
+    }
+
+    .hero-stats {
+      display: flex;
+      gap: 0;
+      border: 1px solid var(--border-dark);
+      border-radius: var(--r-md);
+      overflow: hidden;
+      background: var(--bg-card);
+      box-shadow: var(--shadow-sm);
+      opacity: 0;
+      animation: fadeUp 0.7s ease forwards 0.55s;
+    }
+    .hero-stat {
+      flex: 1;
+      padding: 20px 24px;
+      border-right: 1px solid var(--border);
+      text-align: center;
+    }
+    .hero-stat:last-child { border-right: none; }
+    .stat-num {
+      font-family: var(--serif);
+      font-size: 34px;
+      font-weight: 700;
+      color: var(--ink);
+      line-height: 1;
+      display: block;
+      margin-bottom: 4px;
+    }
+    .stat-label {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--ink-soft);
+    }
+
+    /* Hero aside — visual callout */
+    .hero-aside {
+      width: 260px;
+      flex-shrink: 0;
+      opacity: 0;
+      animation: fadeIn 0.8s ease forwards 0.8s;
+    }
+    .hero-callout {
+      background: var(--bg-dark);
+      border-radius: var(--r-lg);
+      padding: 32px 28px;
+      text-align: center;
+      position: relative;
+      overflow: hidden;
+    }
+    .hero-callout::before {
+      content: '';
+      position: absolute;
+      top: -60px; right: -60px;
+      width: 160px; height: 160px;
+      background: radial-gradient(circle, rgba(180,140,80,0.18) 0%, transparent 70%);
+      pointer-events: none;
+    }
+    .callout-big {
+      font-family: var(--serif);
+      font-size: 60px;
+      font-weight: 700;
+      color: var(--gold-light);
+      line-height: 1;
+      display: block;
+      margin-bottom: 4px;
+    }
+    .callout-label {
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: rgba(245,244,240,0.5);
+      display: block;
+      margin-bottom: 28px;
+    }
+    .callout-items {
+      list-style: none;
+      text-align: left;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .callout-items li {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+      color: rgba(245,244,240,0.75);
+    }
+    .callout-items li::before {
+      content: '✓';
+      width: 18px; height: 18px;
+      background: rgba(180,140,80,0.2);
+      border: 1px solid rgba(180,140,80,0.4);
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 10px;
+      color: var(--gold-light);
+      flex-shrink: 0;
+    }
+
+    /* ═══════════════════════════════════════════════════════════
+       PROBLEM SECTION
+    ═══════════════════════════════════════════════════════════ */
+    #problem { background: var(--bg-subtle); }
+
+    .problem-intro {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 64px;
+      align-items: center;
+      margin-bottom: 56px;
+    }
+
+    .problem-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 2px;
+      border-radius: var(--r-md);
+      overflow: hidden;
+    }
+    .problem-card {
+      background: var(--bg-card);
+      padding: 32px 28px;
+      position: relative;
+      border-top: 3px solid transparent;
+      transition: border-color 0.25s, box-shadow 0.25s;
+    }
+    .problem-card:hover {
+      border-top-color: var(--red);
+      box-shadow: var(--shadow-sm);
+      z-index: 1;
+    }
+    .problem-num {
+      font-family: var(--serif);
+      font-size: 13px;
+      color: var(--ink-faint);
+      font-weight: 400;
+      margin-bottom: 12px;
+    }
+    .problem-card h3 {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--red);
+      margin-bottom: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .problem-card p {
+      font-size: 15px;
+      color: var(--ink-mid);
+      line-height: 1.65;
+    }
+
+    /* ═══════════════════════════════════════════════════════════
+       OVERVIEW / ARCHITECTURE
+    ═══════════════════════════════════════════════════════════ */
+    #overview { background: var(--bg); }
+
+    .arch-header {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 64px;
+      align-items: start;
+      margin-bottom: 56px;
+    }
+
+    /* Pipeline flow — horizontal stages */
+    .pipeline-flow {
+      margin-top: 0;
+    }
+
+    .pipeline-row {
+      display: grid;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .pipeline-row.row-5 { grid-template-columns: repeat(5, 1fr); }
+    .pipeline-row.row-4 { grid-template-columns: repeat(4, 1fr); max-width: 80%; margin-left: auto; }
+
+    .pipeline-connector {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 24px;
+      margin-bottom: 12px;
+    }
+    .pipeline-connector span {
+      font-size: 18px;
+      color: var(--ink-faint);
+    }
+
+    .stage-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-dark);
+      border-radius: var(--r-md);
+      padding: 20px 16px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.2s;
+      position: relative;
+      overflow: hidden;
+    }
+    .stage-card::after {
+      content: '';
+      position: absolute;
+      bottom: 0; left: 0; right: 0;
+      height: 3px;
+      background: var(--gold);
+      transform: scaleX(0);
+      transition: transform 0.25s;
+    }
+    .stage-card:hover {
+      border-color: var(--border-gold);
+      box-shadow: var(--shadow-md);
+      transform: translateY(-2px);
+    }
+    .stage-card:hover::after { transform: scaleX(1); }
+
+    .stage-icon { font-size: 20px; display: block; margin-bottom: 8px; }
+    .stage-sys {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      color: var(--gold);
+      margin-bottom: 5px;
+    }
+    .stage-name {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--ink);
+      line-height: 1.35;
+      margin-bottom: 6px;
+    }
+    .stage-steps {
+      font-size: 11px;
+      color: var(--ink-soft);
+      background: var(--bg-subtle);
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 100px;
+    }
+
+    /* ═══════════════════════════════════════════════════════════
+       SYSTEMS DEEP DIVE
+    ═══════════════════════════════════════════════════════════ */
+    #systems { background: var(--bg-subtle); }
+
+    .systems-list {
+      margin-top: 48px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .system-entry {
+      background: var(--bg-card);
+      border: 1px solid var(--border-dark);
+      border-radius: var(--r-md);
+      overflow: hidden;
+      transition: box-shadow 0.2s;
+    }
+    .system-entry:hover { box-shadow: var(--shadow-sm); }
+
+    .system-header {
+      padding: 28px 32px;
+      display: grid;
+      grid-template-columns: 64px 1fr auto;
+      gap: 24px;
+      align-items: center;
+      cursor: pointer;
+      transition: background 0.15s;
+      position: relative;
+    }
+    .system-header:hover { background: rgba(0,0,0,0.015); }
+
+    /* Left accent strip */
+    .system-entry::before {
+      content: '';
+      position: absolute;
+      left: 0; top: 0; bottom: 0;
+      width: 3px;
+      background: var(--gold);
+      border-radius: 3px 0 0 3px;
+      opacity: 0;
+      transition: opacity 0.2s;
+    }
+    .system-entry:hover::before { opacity: 1; }
+
+    .sys-num-badge {
+      width: 52px; height: 52px;
+      background: var(--bg-subtle);
+      border: 2px solid var(--border-dark);
+      border-radius: var(--r-sm);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: var(--serif);
+      font-size: 22px;
+      font-weight: 700;
+      color: var(--ink-soft);
+      flex-shrink: 0;
+      transition: all 0.2s;
+    }
+    .system-entry:hover .sys-num-badge {
+      background: var(--gold-pale);
+      border-color: var(--border-gold);
+      color: var(--gold);
+    }
+
+    .sys-meta { min-width: 0; }
+    .sys-category {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--gold);
+      margin-bottom: 4px;
+    }
+    .sys-title {
+      font-family: var(--sans);
+      font-size: 17px;
+      font-weight: 700;
+      color: var(--ink);
+      margin-bottom: 5px;
+    }
+    .sys-desc {
+      font-size: 14px;
+      color: var(--ink-mid);
+      line-height: 1.55;
+    }
+
+    .sys-tags {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      align-items: flex-start;
+      justify-content: flex-end;
+    }
+    .tag {
+      font-family: var(--sans);
+      font-size: 11px;
+      font-weight: 600;
+      padding: 4px 10px;
+      border-radius: 100px;
+      white-space: nowrap;
+    }
+    .tag-gold { background: var(--gold-pale); color: var(--gold); border: 1px solid var(--border-gold); }
+    .tag-blue { background: var(--blue-bg); color: var(--blue); }
+    .tag-green { background: var(--green-bg); color: var(--green); }
+    .tag-muted { background: var(--bg-subtle); color: var(--ink-mid); border: 1px solid var(--border); }
+    .tag-purple { background: #F3EEFF; color: #7C4DBC; }
+
+    /* Chevron toggle */
+    .sys-chevron {
+      width: 28px; height: 28px;
+      display: flex; align-items: center; justify-content: center;
+      border-radius: 50%;
+      background: var(--bg-subtle);
+      color: var(--ink-soft);
+      font-size: 12px;
+      transition: all 0.25s;
+      flex-shrink: 0;
+    }
+    .system-entry.open .sys-chevron {
+      background: var(--gold-pale);
+      color: var(--gold);
+      transform: rotate(180deg);
+    }
+
+    /* System body */
+    .system-body {
+      display: none;
+      padding: 8px 32px 36px;
+      border-top: 1px solid var(--border);
+    }
+    .system-body.open { display: block; }
+
+    /* Flow steps */
+    .flow-steps {
+      position: relative;
+      padding-left: 24px;
+      margin-top: 24px;
+    }
+    .flow-steps::before {
+      content: '';
+      position: absolute;
+      left: 7px; top: 8px; bottom: 8px;
+      width: 2px;
+      background: linear-gradient(to bottom, var(--gold), transparent);
+      border-radius: 2px;
+    }
+
+    .flow-step {
+      position: relative;
+      display: grid;
+      grid-template-columns: 20px 1fr;
+      gap: 16px;
+      padding: 14px 0;
+      align-items: start;
+    }
+
+    .step-node {
+      width: 14px; height: 14px;
+      border: 2px solid var(--gold);
+      border-radius: 50%;
+      background: var(--bg-card);
+      margin-top: 4px;
+      flex-shrink: 0;
+      z-index: 1;
+      position: relative;
+      transition: background 0.2s;
+    }
+    .flow-step:hover .step-node { background: var(--gold); }
+
+    .step-content {}
+    .step-source {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--gold);
+      margin-bottom: 2px;
+    }
+    .step-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--ink);
+      margin-bottom: 4px;
+    }
+    .step-detail {
+      font-size: 14px;
+      color: var(--ink-mid);
+      line-height: 1.6;
+    }
+
+    .badge-ai {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: var(--gold-pale);
+      border: 1px solid var(--border-gold);
+      border-radius: 100px;
+      padding: 3px 10px;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--gold);
+      margin-top: 6px;
+      letter-spacing: 0.04em;
+    }
+    .badge-branch {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: #F3EEFF;
+      border: 1px solid rgba(124,77,188,0.2);
+      border-radius: 100px;
+      padding: 3px 10px;
+      font-size: 11px;
+      font-weight: 700;
+      color: #7C4DBC;
+      margin: 4px 4px 0 0;
+    }
+
+    /* ═══════════════════════════════════════════════════════════
+       TOOLS GRID
+    ═══════════════════════════════════════════════════════════ */
+    #tools { background: var(--bg); }
+
+    .tools-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-top: 48px;
+    }
+    .tool-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-dark);
+      border-radius: var(--r-md);
+      padding: 24px 22px;
+      transition: all 0.2s;
+      position: relative;
+      overflow: hidden;
+    }
+    .tool-card::after {
+      content: '';
+      position: absolute;
+      bottom: 0; left: 0; right: 0;
+      height: 3px;
+      background: var(--gold);
+      transform: scaleX(0);
+      transition: transform 0.25s;
+    }
+    .tool-card:hover {
+      box-shadow: var(--shadow-md);
+      border-color: var(--border-gold);
+    }
+    .tool-card:hover::after { transform: scaleX(1); }
+
+    .tool-emoji { font-size: 26px; display: block; margin-bottom: 14px; }
+    .tool-name {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--ink);
+      margin-bottom: 3px;
+    }
+    .tool-role {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--gold);
+      margin-bottom: 10px;
+    }
+    .tool-desc {
+      font-size: 13px;
+      color: var(--ink-mid);
+      line-height: 1.6;
+    }
+
+    /* ═══════════════════════════════════════════════════════════
+       BEFORE / AFTER COMPARISON
+    ═══════════════════════════════════════════════════════════ */
+    #comparison { background: var(--bg-subtle); }
+
+    .compare-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin-top: 48px;
+    }
+    .compare-col {
+      background: var(--bg-card);
+      border: 1px solid var(--border-dark);
+      border-radius: var(--r-lg);
+      padding: 36px 32px;
+    }
+    .compare-col.after {
+      border-color: rgba(46,139,106,0.35);
+      background: #FDFFFC;
+    }
+    .compare-col-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 28px;
+    }
+    .compare-col-badge {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      padding: 5px 12px;
+      border-radius: 100px;
+    }
+    .compare-col.before .compare-col-badge {
+      background: var(--red-bg);
+      color: var(--red);
+    }
+    .compare-col.after .compare-col-badge {
+      background: var(--green-bg);
+      color: var(--green);
+    }
+
+    .compare-item {
+      display: flex;
+      gap: 14px;
+      align-items: flex-start;
+      padding: 14px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .compare-item:last-child { border-bottom: none; }
+    .compare-icon { font-size: 16px; flex-shrink: 0; margin-top: 2px; }
+    .compare-text { font-size: 14px; color: var(--ink-mid); line-height: 1.6; }
+
+    /* ═══════════════════════════════════════════════════════════
+       IMPACT METRICS
+    ═══════════════════════════════════════════════════════════ */
+    #impact { background: var(--bg); }
+
+    .impact-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      margin-top: 48px;
+    }
+    .impact-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-dark);
+      border-radius: var(--r-md);
+      padding: 32px 28px;
+      position: relative;
+      overflow: hidden;
+      transition: all 0.2s;
+    }
+    .impact-card:hover {
+      box-shadow: var(--shadow-md);
+      border-color: var(--border-gold);
+      transform: translateY(-2px);
+    }
+    .impact-card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 3px;
+      background: linear-gradient(90deg, var(--gold), var(--gold-light));
+    }
+    .impact-num {
+      font-family: var(--serif);
+      font-size: 52px;
+      font-weight: 700;
+      color: var(--ink);
+      line-height: 1;
+      margin-bottom: 8px;
+    }
+    .impact-label {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--ink);
+      margin-bottom: 10px;
+    }
+    .impact-detail {
+      font-size: 13px;
+      color: var(--ink-mid);
+      line-height: 1.65;
+    }
+
+    /* ═══════════════════════════════════════════════════════════
+       TECHNICAL DEPTH
+    ═══════════════════════════════════════════════════════════ */
+    #tech { background: var(--bg-subtle); }
+
+    .tech-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 48px;
+    }
+    .tech-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-dark);
+      border-radius: var(--r-md);
+      padding: 32px;
+    }
+    .tech-eyebrow {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--gold);
+      margin-bottom: 10px;
+    }
+    .tech-card p {
+      font-size: 14px;
+      color: var(--ink-mid);
+      line-height: 1.7;
+      margin-bottom: 16px;
+    }
+
+    /* Code presentation — understated, readable, professional */
+    .code-block {
+      background: var(--bg-dark);
+      border-radius: var(--r-sm);
+      padding: 20px 22px;
+      font-family: var(--mono);
+      font-size: 13px;
+      line-height: 1.8;
+      color: #C8C8D8;
+      overflow-x: auto;
+    }
+    .code-block .ck  { color: #A78BCA; } /* keyword */
+    .code-block .cs  { color: #7EC8A0; } /* string */
+    .code-block .cc  { color: #586068; } /* comment */
+    .code-block .cn  { color: var(--gold-light); } /* number */
+    .code-block .cf  { color: #7EB8E0; } /* field name */
+
+    /* ═══════════════════════════════════════════════════════════
+       VIDEO SECTION
+    ═══════════════════════════════════════════════════════════ */
+    #video { background: var(--bg); }
+
+    .video-shell {
+      margin-top: 48px;
+      border-radius: var(--r-lg);
+      overflow: hidden;
+      border: 1px solid var(--border-dark);
+      box-shadow: var(--shadow-lg);
+      position: relative;
+      padding-top: 56.25%;
+      background: var(--bg-dark);
+    }
+    .video-inner {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 20px;
+    }
+    .play-ring {
+      width: 80px; height: 80px;
+      border: 2px solid rgba(212,170,112,0.5);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(180,140,80,0.1);
+      cursor: pointer;
+      transition: all 0.25s;
+    }
+    .play-ring:hover {
+      background: rgba(180,140,80,0.2);
+      border-color: var(--gold-light);
+      transform: scale(1.06);
+    }
+    .play-ring span { font-size: 24px; color: var(--gold-light); margin-left: 4px; }
+    .video-label {
+      font-size: 14px;
+      font-weight: 600;
+      color: rgba(245,244,240,0.7);
+      letter-spacing: 0.05em;
+    }
+    .video-sub {
+      font-size: 13px;
+      color: rgba(245,244,240,0.35);
+    }
+
+    /* ═══════════════════════════════════════════════════════════
+       CLOSING / CTA
+    ═══════════════════════════════════════════════════════════ */
+    #closing {
+      background: var(--closing-bg);
+      padding: 120px 0;
+      text-align: center;
+      position: relative;
+      overflow: hidden;
+    }
+    #closing::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(ellipse 70% 60% at 50% 100%, rgba(180,140,80,0.1) 0%, transparent 60%);
+      pointer-events: none;
+    }
+    #closing h2 {
+      color: var(--closing-text);
+      max-width: 640px;
+      margin: 0 auto 20px;
+    }
+    #closing h2 em { color: var(--gold-light); }
+    #closing .lead {
+      color: var(--closing-lead);
+      max-width: 580px;
+      margin: 0 auto 48px;
+      font-size: 18px;
+    }
+    #closing .section-eyebrow { color: rgba(212,170,112,0.8); }
+
+    .cta-row {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+    .btn-primary {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 14px 28px;
+      background: var(--gold);
+      color: var(--bg-dark);
+      font-family: var(--sans);
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      text-decoration: none;
+      border-radius: var(--r-sm);
+      border: none;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .btn-primary:hover { background: var(--gold-light); transform: translateY(-1px); box-shadow: 0 4px 16px rgba(180,140,80,0.4); }
+
+    .btn-ghost {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 14px 28px;
+      background: transparent;
+      color: var(--closing-lead);
+      font-family: var(--sans);
+      font-size: 14px;
+      font-weight: 600;
+      text-decoration: none;
+      border-radius: var(--r-sm);
+      border: 1px solid rgba(255,255,255,0.15);
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .btn-ghost:hover { border-color: rgba(255,255,255,0.35); color: var(--closing-text); }
+
+    /* ─── FOOTER ─── */
+    footer {
+      background: var(--footer-bg);
+      padding: 24px 40px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-top: 1px solid rgba(255,255,255,0.05);
+    }
+    footer p {
+      font-size: 12px;
+      color: var(--footer-text);
+      letter-spacing: 0.03em;
+    }
+    .footer-links {
+      display: flex;
+      gap: 20px;
+    }
+    .footer-links a {
+      font-size: 12px;
+      color: var(--footer-link);
+      text-decoration: none;
+      letter-spacing: 0.03em;
+      transition: color 0.15s;
+    }
+    .footer-links a:hover { color: var(--gold-light); }
+
+    /* ═══════════════════════════════════════════════════════════
+       ANIMATIONS
+    ═══════════════════════════════════════════════════════════ */
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(20px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; }
+      to   { opacity: 1; }
+    }
+
+    .reveal {
+      opacity: 0;
+      transform: translateY(28px);
+      transition: opacity 0.65s ease, transform 0.65s ease;
+    }
+    .reveal.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+    .reveal-delay-1 { transition-delay: 0.1s; }
+    .reveal-delay-2 { transition-delay: 0.2s; }
+    .reveal-delay-3 { transition-delay: 0.3s; }
+
+    /* ═══════════════════════════════════════════════════════════
+       RESPONSIVE
+    ═══════════════════════════════════════════════════════════ */
+    @media (max-width: 1024px) {
+      .hero-aside { display: none; }
+      .hero-inner { grid-template-columns: 1fr; }
+      .arch-header { grid-template-columns: 1fr; gap: 32px; }
+      .pipeline-row.row-5 { grid-template-columns: repeat(3, 1fr); }
+      .pipeline-row.row-4 { max-width: 100%; grid-template-columns: repeat(2, 1fr); }
+      .tools-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 768px) {
+      body { font-size: 17px; }
+      nav { padding: 0 20px; }
+      .nav-links { display: none; }
+      .container, .container-wide, .container-narrow { padding: 0 20px; }
+      section { padding: 72px 0; }
+      .hero-stats { flex-wrap: wrap; }
+      .hero-stat { flex: 0 0 calc(50% - 1px); }
+      .problem-intro { grid-template-columns: 1fr; }
+      .problem-grid { grid-template-columns: 1fr; }
+      .system-header { grid-template-columns: 52px 1fr; }
+      .sys-tags { display: none; }
+      .compare-grid { grid-template-columns: 1fr; }
+      .impact-grid { grid-template-columns: 1fr 1fr; }
+      .tech-grid { grid-template-columns: 1fr; }
+      .pipeline-row.row-5 { grid-template-columns: 1fr 1fr; }
+      footer { flex-direction: column; gap: 12px; }
+    }
+    @media (max-width: 480px) {
+      h1 { font-size: 38px; }
+      h2 { font-size: 28px; }
+      .impact-grid { grid-template-columns: 1fr; }
+      .tools-grid { grid-template-columns: 1fr; }
+    }
+
+    /* Dark mode — card and compare overrides */
+    [data-theme="dark"] .compare-col.after {
+      background: rgba(46,139,106,0.12);
+      border-color: rgba(46,139,106,0.3);
+    }
+    [data-theme="dark"] .hero-callout {
+      background: #0D0D0C;
+    }
+    [data-theme="dark"] .code-block {
+      background: #0D0D0C;
+    }
+    [data-theme="dark"] .nav-cta {
+      background: var(--gold) !important;
+      color: #1A1515 !important;
+    }
+    [data-theme="dark"] .nav-cta:hover {
+      background: var(--gold-light) !important;
+    }
+
+    /* ─── THEME TOGGLE ─── */
+    .theme-toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--bg-subtle);
+      border: 1px solid var(--border-dark);
+      border-radius: 100px;
+      padding: 5px 12px 5px 8px;
+      cursor: pointer;
+      transition: all 0.2s;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--ink-mid);
+      user-select: none;
+      flex-shrink: 0;
+    }
+    .theme-toggle:hover {
+      background: var(--bg-card);
+      color: var(--ink);
+      border-color: var(--gold);
+    }
+    .theme-toggle-icon { font-size: 14px; line-height: 1; }
+    .theme-toggle-label { letter-spacing: 0.02em; }
+
+    /* Dark mode body transition */
+    body, nav, section, footer, .compare-col.after {
+      transition: background-color 0.35s ease, color 0.35s ease, border-color 0.25s ease;
+    }
+
+  </style>
+</head>
+<body>
+
+  <!-- ════════════════ NAVIGATION ════════════════ -->
+  <nav id="nav">
+    <div class="nav-brand">
+      <div class="nav-logomark"><span>E</span></div>
+      <span class="nav-name">Everly &amp; Co. — Automation Case Study</span>
+    </div>
+    <div class="nav-links">
+      <a href="#overview">Architecture</a>
+      <a href="#systems">Systems</a>
+      <a href="#impact">Metrics</a>
+      <a href="#tech">Technical</a>
+      <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" aria-label="Toggle dark mode">
+        <span class="theme-toggle-icon" id="themeIcon">🌙</span>
+        <span class="theme-toggle-label" id="themeLabel">Dark</span>
+      </button>
+      <a href="#closing" class="nav-cta">Contact</a>
+    </div>
+  </nav>
+
+  <!-- ════════════════ HERO ════════════════ -->
+  <section id="hero">
+    <div class="container">
+      <div class="hero-inner">
+        <div class="hero-text">
+          <div class="hero-badge-pill">
+            <div class="badge-dot"></div>
+            Automation Case Study — Real-World Production System
+          </div>
+          <h1>End-to-End<br><em>Client Lifecycle</em><br>Automation</h1>
+          <p class="hero-desc">
+            A complete AI-powered operations pipeline for a luxury photography studio — handling every client touchpoint from first inquiry to gallery delivery, with zero manual intervention.
+          </p>
+          <div class="hero-stats">
+            <div class="hero-stat">
+              <span class="stat-num">9</span>
+              <span class="stat-label">Automation Systems</span>
+            </div>
+            <div class="hero-stat">
+              <span class="stat-num">107</span>
+              <span class="stat-label">Workflow Steps</span>
+            </div>
+            <div class="hero-stat">
+              <span class="stat-num">12</span>
+              <span class="stat-label">Tools Integrated</span>
+            </div>
+            <div class="hero-stat">
+              <span class="stat-num">0</span>
+              <span class="stat-label">Manual Emails</span>
+            </div>
+          </div>
+        </div>
+        <div class="hero-aside">
+          <div class="hero-callout">
+            <span class="callout-big">100%</span>
+            <span class="callout-label">Automated Lifecycle</span>
+            <ul class="callout-items">
+              <li>Instant lead response (&lt;60s)</li>
+              <li>AI-scored lead intelligence</li>
+              <li>Auto-generated proposals</li>
+              <li>E-signature contracts</li>
+              <li>Gallery delivery &amp; invoicing</li>
+              <li>Post-project retention loop</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider"></div>
+
+  <!-- ════════════════ PROBLEM ════════════════ -->
+  <section id="problem" class="compact">
+    <div class="container">
+      <div class="reveal">
+        <div class="section-eyebrow">The Problem</div>
+        <h2>Manual workflows<br><em>kill creative businesses</em></h2>
+      </div>
+      <div class="problem-intro reveal reveal-delay-1">
+        <div>
+          <p style="font-size:17px; color:var(--ink-mid); line-height:1.75; max-width:480px;">
+            Photography studios lose clients not because of poor photography — but because of slow responses, missed follow-ups, and inconsistent operations. Every manual task is a failure point waiting to happen.
+          </p>
+        </div>
+        <div>
+          <p style="font-size:17px; color:var(--ink-mid); line-height:1.75; max-width:440px;">
+            This system was built to eliminate that entirely — replacing every manual touchpoint with a reliable, consistent, AI-powered process that works even while the photographer is on a shoot.
+          </p>
+        </div>
+      </div>
+      <div class="problem-grid reveal">
+        <div class="problem-card">
+          <div class="problem-num">01 / 04</div>
+          <h3>Lost Leads</h3>
+          <p>Without instant AI triage, HOT leads go cold within hours. Studios manually sifting through inquiries lose clients to faster competitors who respond in minutes.</p>
+        </div>
+        <div class="problem-card">
+          <div class="problem-num">02 / 04</div>
+          <h3>Inconsistent Communication</h3>
+          <p>Every email written from scratch means different quality, tone drift, and forgotten follow-ups. A no-show discovery call might never get a rebook email. Revenue disappears silently.</p>
+        </div>
+        <div class="problem-card">
+          <div class="problem-num">03 / 04</div>
+          <h3>Invisible Pipeline</h3>
+          <p>Without real-time pipeline tracking, no one knows where each client actually is — leading to double bookings, missed invoices, and delayed deliveries.</p>
+        </div>
+        <div class="problem-card">
+          <div class="problem-num">04 / 04</div>
+          <h3>Post-Delivery Revenue Leakage</h3>
+          <p>Most studios deliver the gallery and stop. No review requests, no rebooking sequence, no LTV tracking. Repeat business — the most profitable revenue stream — never materializes.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider"></div>
+
+  <!-- ════════════════ OVERVIEW / ARCHITECTURE ════════════════ -->
+  <section id="overview">
+    <div class="container-wide">
+      <div class="arch-header reveal">
+        <div>
+          <div class="section-eyebrow">System Architecture</div>
+          <h2>One pipeline,<br><em>nine automation systems</em></h2>
+        </div>
+        <div>
+          <p class="lead">
+            Every system is modular, webhook-connected, and feeds a real-time Google Sheets CRM. From first form submission to post-delivery rebooking — fully hands-off.
+          </p>
+        </div>
+      </div>
+
+      <div class="pipeline-flow reveal">
+        <!-- Row 1: 5 systems -->
+        <div class="pipeline-row row-5">
+          <div class="stage-card">
+            <span class="stage-icon">📋</span>
+            <div class="stage-sys">System 1A</div>
+            <div class="stage-name">Inquiry Intake + AI Classification</div>
+            <span class="stage-steps">19 steps</span>
+          </div>
+          <div class="stage-card">
+            <span class="stage-icon">🔄</span>
+            <div class="stage-sys">System 1B</div>
+            <div class="stage-name">Email Bounce Recovery</div>
+            <span class="stage-steps">3 steps</span>
+          </div>
+          <div class="stage-card">
+            <span class="stage-icon">📅</span>
+            <div class="stage-sys">System 1.5A</div>
+            <div class="stage-name">Booking Tracker + Notifications</div>
+            <span class="stage-steps">8 steps</span>
+          </div>
+          <div class="stage-card">
+            <span class="stage-icon">🔀</span>
+            <div class="stage-sys">System 1.5B</div>
+            <div class="stage-name">Call Outcome Routing</div>
+            <span class="stage-steps">17 steps</span>
+          </div>
+          <div class="stage-card">
+            <span class="stage-icon">📄</span>
+            <div class="stage-sys">System 2</div>
+            <div class="stage-name">Proposal Generator</div>
+            <span class="stage-steps">11 steps</span>
+          </div>
+        </div>
+
+        <div class="pipeline-connector"><span>↓</span></div>
+
+        <!-- Row 2: 4 systems -->
+        <div class="pipeline-row row-4">
+          <div class="stage-card">
+            <span class="stage-icon">✍️</span>
+            <div class="stage-sys">System 3A</div>
+            <div class="stage-name">Contract + Auto-Pricing</div>
+            <span class="stage-steps">12 steps</span>
+          </div>
+          <div class="stage-card">
+            <span class="stage-icon">💳</span>
+            <div class="stage-sys">System 3B</div>
+            <div class="stage-name">Post-Signature Invoice</div>
+            <span class="stage-steps">23 steps</span>
+          </div>
+          <div class="stage-card">
+            <span class="stage-icon">🖼️</span>
+            <div class="stage-sys">System 4</div>
+            <div class="stage-name">Gallery Delivery</div>
+            <span class="stage-steps">6 steps</span>
+          </div>
+          <div class="stage-card">
+            <span class="stage-icon">⭐</span>
+            <div class="stage-sys">System 5</div>
+            <div class="stage-name">Review + Rebooking</div>
+            <span class="stage-steps">8 steps</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider"></div>
+
+  <!-- ════════════════ SYSTEMS DEEP DIVE ════════════════ -->
+  <section id="systems">
+    <div class="container">
+      <div class="reveal">
+        <div class="section-eyebrow">System Breakdown</div>
+        <h2>Inside every<br><em>automation layer</em></h2>
+        <p class="lead" style="margin-top:12px;">Click any system to expand the full step-by-step flow. Each step represents a real Zapier action, AI call, or webhook.</p>
+      </div>
+
+      <div class="systems-list">
+
+        <!-- SYSTEM 1A -->
+        <div class="system-entry reveal" style="margin-top:48px;">
+          <div class="system-header" onclick="toggleSystem(this)">
+            <div class="sys-num-badge">1A</div>
+            <div class="sys-meta">
+              <div class="sys-category">Entry Point — AI Powered</div>
+              <div class="sys-title">Client Inquiry Auto-System</div>
+              <div class="sys-desc">19-step pipeline triggered by Google Forms. AI classifies leads, recommends packages, sends personalized emails, and creates tasks — all in under 60 seconds.</div>
+            </div>
+            <div class="sys-tags">
+              <span class="tag tag-gold">GPT-4o-mini × 5</span>
+              <span class="tag tag-blue">Google Forms</span>
+              <span class="tag tag-green">Sheets</span>
+              <span class="tag tag-muted">Telegram</span>
+              <span class="tag tag-muted">Gmail</span>
+            </div>
+            <div class="sys-chevron">▾</div>
+          </div>
+          <div class="system-body">
+            <div class="flow-steps">
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Google Forms</div>
+                  <div class="step-title">Lead Capture Trigger</div>
+                  <div class="step-detail">New form submission fires the entire pipeline. Fields include: name, event type, date, venue, guest count, budget, source, message, and booking intent.</div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">OpenAI GPT-4o-mini</div>
+                  <div class="step-title">AI Lead Classifier</div>
+                  <div class="step-detail">Structured prompt with tiered classification rules. Outputs: Lead Status (HOT/WARM/COLD), Urgency Score (1–10), 2-sentence Summary, Recommended Action. Has fallback logic for empty fields.</div>
+                  <div><span class="badge-ai">✦ AI Step — Structured Output Schema</span></div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">OpenAI GPT-4o-mini</div>
+                  <div class="step-title">AI Service Recommender</div>
+                  <div class="step-detail">Maps budget to package tier (Essential → Elite). Returns: Primary Package, Secondary Package, Upsell Opportunity, Pitch Angle tailored to client context.</div>
+                  <div><span class="badge-ai">✦ AI Step — Package + Revenue Logic</span></div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Zapier Formatter + Config Sheet</div>
+                  <div class="step-title">Client ID + Lead ID Generation</div>
+                  <div class="step-detail">Unix timestamp → trimmed integer → reads Config sheet counter → increments by 1 → writes back. Generates LED-XXXX lead ID and C-XXXX client ID atomically.</div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Google Sheets</div>
+                  <div class="step-title">Find or Create Client Record</div>
+                  <div class="step-detail">Lookup by email — if exists, reuse; if not, create new Client row. Prevents duplicate client records across multiple bookings.</div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Google Sheets</div>
+                  <div class="step-title">Data Ingestion — Leads + Pipeline</div>
+                  <div class="step-detail">Writes 20 columns to Leads sheet (all form data + AI outputs). Simultaneously creates row in Pipeline Tracker with Stage: "Inquiry" and Next Action: "Send Discovery Call Link".</div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">OpenAI GPT-4o-mini × 2</div>
+                  <div class="step-title">Personalized Email Subject + Body</div>
+                  <div class="step-detail">Subject: tone varies by lead status (HOT = soft urgency, WARM = curious, COLD = zero pressure). Body: 150-word personalized email as Victoria Everly. Includes Cal.com link with lead_id embedded in URL.</div>
+                  <div><span class="badge-ai">✦ AI Step — Persona-Aware Copywriting</span></div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Gmail</div>
+                  <div class="step-title">Send Personalized Response Email</div>
+                  <div class="step-detail">HTML email delivered as Victoria Everly with proper From name. Fires within seconds of form submission.</div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">OpenAI + Zapier Formatter</div>
+                  <div class="step-title">Urgency Calculator + Follow-up Due Date</div>
+                  <div class="step-detail">AI maps urgency score to follow-up interval (9–10 = 0 days, 7–8 = 1 day, 5–6 = 3 days). Formatter adds that interval to submission timestamp for precise due date.</div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">OpenAI GPT-4o-mini</div>
+                  <div class="step-title">AI Task Recommender (Google Tasks)</div>
+                  <div class="step-detail">Generates a 6-section follow-up brief: Client Snapshot, Urgency Note, Package to Pitch, What to Say, What to Avoid, Next Step. Designed for Victoria to act on from her phone.</div>
+                  <div><span class="badge-ai">✦ AI Step — Actionable Sales Brief</span></div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">OpenAI + Telegram</div>
+                  <div class="step-title">AI Telegram Notification</div>
+                  <div class="step-detail">Formats and sends a scannable notification to Victoria's Telegram. Includes: lead status badge, urgency score, AI summary, best package, upsell opportunity, and follow-up task — all in one message.</div>
+                  <div><span class="badge-ai">✦ AI Step — Real-time Owner Briefing</span></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- SYSTEM 1B -->
+        <div class="system-entry reveal">
+          <div class="system-header" onclick="toggleSystem(this)">
+            <div class="sys-num-badge">1B</div>
+            <div class="sys-meta">
+              <div class="sys-category">Edge Case Handler</div>
+              <div class="sys-title">Email Bounce Recovery</div>
+              <div class="sys-desc">Watches the Leads sheet for rows where the Google Form respondent email differs from the entered contact email — and auto-sends a recovery email to the correct address.</div>
+            </div>
+            <div class="sys-tags">
+              <span class="tag tag-blue">Google Sheets Watch</span>
+              <span class="tag tag-green">Gmail</span>
+              <span class="tag tag-muted">Filter Logic</span>
+            </div>
+            <div class="sys-chevron">▾</div>
+          </div>
+          <div class="system-body">
+            <div class="flow-steps">
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Google Sheets</div>
+                  <div class="step-title">Watch Leads Sheet for Updates</div>
+                  <div class="step-detail">Polls Leads sheet deduplicated by email. Fires when a new or changed row is detected.</div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Zapier Filter</div>
+                  <div class="step-title">Detect Email Mismatch</div>
+                  <div class="step-detail">Compares respondent email (from Google Form) vs email entered in form. Only continues if they differ — preventing unnecessary sends.</div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Gmail</div>
+                  <div class="step-title">Send Recovery Email</div>
+                  <div class="step-detail">Personalized email sent to the respondent address asking them to confirm the right contact email. Includes a direct Cal.com booking link with their lead_id pre-embedded so no data is lost.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- SYSTEM 1.5A -->
+        <div class="system-entry reveal">
+          <div class="system-header" onclick="toggleSystem(this)">
+            <div class="sys-num-badge" style="font-size:15px;">1.5A</div>
+            <div class="sys-meta">
+              <div class="sys-category">Booking Intelligence</div>
+              <div class="sys-title">Cal.com Booking Tracker</div>
+              <div class="sys-desc">When a discovery call is booked via Cal.com, this system updates the Pipeline Tracker, formats the call time, generates an AI notification, and fires a webhook to the backend bot.</div>
+            </div>
+            <div class="sys-tags">
+              <span class="tag tag-gold">Cal.com Webhook</span>
+              <span class="tag tag-blue">Sheets × 2</span>
+              <span class="tag tag-muted">GPT-4o-mini</span>
+              <span class="tag tag-muted">Telegram</span>
+            </div>
+            <div class="sys-chevron">▾</div>
+          </div>
+          <div class="system-body">
+            <div class="flow-steps">
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Webhook (Cal.com)</div>
+                  <div class="step-title">Booking Event Trigger</div>
+                  <div class="step-detail">Cal.com fires a webhook on booking. Payload includes: lead_id (embedded in booking URL), startTime, attendee email/name.</div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Google Sheets</div>
+                  <div class="step-title">Lookup Lead + Pipeline Rows</div>
+                  <div class="step-detail">Uses lead_id from Cal.com payload to fetch both the full Lead data and the current Pipeline Tracker row for that client.</div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Google Sheets</div>
+                  <div class="step-title">Update Pipeline Tracker</div>
+                  <div class="step-detail">Writes: Stage → "Discovery Call Booked", Last Action → "Discovery Call Scheduled", Next Action → "Conduct Discovery Call", Call Time, Status → "Scheduled".</div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Zapier Formatter + GPT-4o-mini</div>
+                  <div class="step-title">Format Time → AI Notification</div>
+                  <div class="step-detail">Converts UTC startTime to Asia/Manila timezone. AI formats a structured Telegram message with lead context, urgency, package, and call time.</div>
+                  <div><span class="badge-ai">✦ AI Step — Structured Notification</span></div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Telegram + Webhook</div>
+                  <div class="step-title">Owner Alert + Pipeline Bot</div>
+                  <div class="step-detail">Sends Telegram message to Victoria. Also POSTs full booking data to Railway.app backend at /pipeline_notify endpoint for further processing.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- SYSTEM 1.5B -->
+        <div class="system-entry reveal">
+          <div class="system-header" onclick="toggleSystem(this)">
+            <div class="sys-num-badge" style="font-size:15px;">1.5B</div>
+            <div class="sys-meta">
+              <div class="sys-category">Branching Logic</div>
+              <div class="sys-title">Call Outcome Email Routing</div>
+              <div class="sys-desc">After the discovery call, Victoria's backend bot fires a webhook with an outcome code. This system branches into 4 paths: completed &amp; continue, no-show, reschedule, or reschedule on-call — each sends a unique AI-written email.</div>
+            </div>
+            <div class="sys-tags">
+              <span class="tag tag-purple">4-Way Branch</span>
+              <span class="tag tag-gold">GPT-4o-mini × 4</span>
+              <span class="tag tag-green">Gmail × 4</span>
+            </div>
+            <div class="sys-chevron">▾</div>
+          </div>
+          <div class="system-body">
+            <div class="flow-steps">
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Webhook + Google Sheets</div>
+                  <div class="step-title">Catch Outcome + Lookup Lead</div>
+                  <div class="step-detail">Backend sends payload with lead_id and action code. Immediately fetches full lead data from Leads sheet.</div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Zapier Branching</div>
+                  <div class="step-title">4-Way Conditional Split</div>
+                  <div class="step-detail">Routes by action code: completed_continue → continue conversation; no_show → gentle missed-call email; reschedule → rebook email; reschedule_oncall → confirmed rebook email.</div>
+                  <div>
+                    <span class="badge-branch">→ completed_continue</span>
+                    <span class="badge-branch">→ no_show</span>
+                    <span class="badge-branch">→ reschedule</span>
+                    <span class="badge-branch">→ reschedule_oncall</span>
+                  </div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">GPT-4o-mini × 2 per path</div>
+                  <div class="step-title">AI Email Subject + Body (Per Outcome)</div>
+                  <div class="step-detail">Each branch has its own AI prompt tuned for that outcome's tone. No-show: gentle, no guilt. Reschedule: effortless accommodation. Continue: warm conversation pickup. All under 100 words with proper HTML structure.</div>
+                  <div><span class="badge-ai">✦ AI Step — Tone-Matched Per Outcome</span></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- SYSTEM 2 -->
+        <div class="system-entry reveal">
+          <div class="system-header" onclick="toggleSystem(this)">
+            <div class="sys-num-badge">2</div>
+            <div class="sys-meta">
+              <div class="sys-category">Proposal Engine</div>
+              <div class="sys-title">Proposal Generator</div>
+              <div class="sys-desc">Triggered by Victoria's backend bot after a successful call. Generates a unique Project ID (EVR-YEAR-XXXX), creates a personalized Google Doc proposal from template, writes an AI delivery email, and updates 3 sheets.</div>
+            </div>
+            <div class="sys-tags">
+              <span class="tag tag-gold">Python Code</span>
+              <span class="tag tag-blue">Google Docs Template</span>
+              <span class="tag tag-muted">GPT-4o-mini × 2</span>
+              <span class="tag tag-green">Gmail</span>
+              <span class="tag tag-muted">3 Sheets Updated</span>
+            </div>
+            <div class="sys-chevron">▾</div>
+          </div>
+          <div class="system-body">
+            <div class="flow-steps">
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Webhook → Google Sheets × 2</div>
+                  <div class="step-title">Fetch Lead + Pipeline Data</div>
+                  <div class="step-detail">Retrieves complete lead profile and pipeline row to populate proposal template fields.</div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Python (Zapier Code)</div>
+                  <div class="step-title">Project ID Generation</div>
+                  <div class="step-detail">Code: <code style="font-family:var(--mono);font-size:12px;color:var(--gold);background:var(--gold-pale);padding:2px 6px;border-radius:3px;">project_id = f"EVR-{year}-{suffix}"</code> — strips "LED-" prefix, takes last 4 chars, prefixes with year. Creates clean traceable IDs like EVR-2026-0042.</div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Google Docs</div>
+                  <div class="step-title">Create Proposal from Template</div>
+                  <div class="step-detail">Copies master proposal template, fills 8 merge fields: client name, project ID, package, price, venue, shoot date, event type, proposal date. Saved to "Everly Proposals" folder. Returns a PDF export link.</div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">GPT-4o-mini × 2</div>
+                  <div class="step-title">AI Email Body + Subject</div>
+                  <div class="step-detail">Body: Written as Victoria Everly. References specific event details and venue naturally. Includes PDF link as proper HTML anchor. Instructs client to reply "Confirmed" to proceed. Subject: under 10 words, feels like receiving something special.</div>
+                  <div><span class="badge-ai">✦ AI Step — Luxury Copywriting Persona</span></div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Gmail → Google Sheets × 2</div>
+                  <div class="step-title">Send Email + Update 3 Systems</div>
+                  <div class="step-detail">Sends proposal email. Updates Pipeline Tracker (Stage: "Proposal Sent"). Creates new Projects row with project ID, proposal link, and sent timestamp.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- SYSTEM 3A -->
+        <div class="system-entry reveal">
+          <div class="system-header" onclick="toggleSystem(this)">
+            <div class="sys-num-badge">3A</div>
+            <div class="sys-meta">
+              <div class="sys-category">Contract Automation</div>
+              <div class="sys-title">Contract Generation + Auto-Pricing</div>
+              <div class="sys-desc">On proposal confirmation, Python calculates pricing (total, 30% deposit, balance) using a package-to-price map, generates a Docsketch contract pre-filled with all client data, and notifies Victoria via Telegram.</div>
+            </div>
+            <div class="sys-tags">
+              <span class="tag tag-gold">Python Pricing Engine</span>
+              <span class="tag tag-blue">Docsketch E-Signature</span>
+              <span class="tag tag-muted">GPT-4o-mini</span>
+              <span class="tag tag-green">Telegram</span>
+            </div>
+            <div class="sys-chevron">▾</div>
+          </div>
+          <div class="system-body">
+            <div class="flow-steps">
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Webhook → Google Sheets × 2</div>
+                  <div class="step-title">Fetch Lead + Project Data</div>
+                  <div class="step-detail">Webhook from backend carries lead_id. Fetches both Leads sheet row and Projects sheet row to get all financial and event fields.</div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Python (Zapier Code)</div>
+                  <div class="step-title">Pricing Calculator — 3-Tier Fallback</div>
+                  <div class="step-detail">Priority logic: (1) Uses confirmed amount from webhook if Victoria provided it for $10k+/TBD leads. (2) Falls back to PRICE_MAP keyed by package name. (3) Falls back to budget string parsing. Calculates 30% deposit and balance automatically.</div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">GPT-4o-mini</div>
+                  <div class="step-title">AI Contract Delivery Message</div>
+                  <div class="step-detail">60-word warm message from Victoria. Tells client to sign, mentions deposit invoice follows. Warm but professional — not corporate.</div>
+                  <div><span class="badge-ai">✦ AI Step — Short-form Copywriting</span></div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Docsketch (E-Signature)</div>
+                  <div class="step-title">Generate + Send E-Signature Contract</div>
+                  <div class="step-detail">Creates contract from template with 10 pre-filled signing elements: client name, email, package, deposit, total, venue, event date, event type, contract date, project ID. Sends email with AI body to client for signature.</div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Google Sheets × 2 + Telegram</div>
+                  <div class="step-title">Update Records + Notify Victoria</div>
+                  <div class="step-detail">Updates Projects sheet (financial data, contract sent date). Updates Pipeline Tracker (Stage: "Contract Sent", Next: "Await Client Signature"). Telegram notification: client name, project ID, event details, full financial breakdown.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- SYSTEM 3B -->
+        <div class="system-entry reveal">
+          <div class="system-header" onclick="toggleSystem(this)">
+            <div class="sys-num-badge">3B</div>
+            <div class="sys-meta">
+              <div class="sys-category">Post-Signature Orchestration — 23 Steps</div>
+              <div class="sys-title">Invoice + Folder Setup (New &amp; Returning Clients)</div>
+              <div class="sys-desc">Triggered when Docsketch marks contract as completed. Handles new and returning Zoho clients via a branch. Creates deposit invoice, sets up gallery folder in Drive, and updates all tracking sheets. The system's most complex flow.</div>
+            </div>
+            <div class="sys-tags">
+              <span class="tag tag-purple">2-Way Branch</span>
+              <span class="tag tag-gold">Zoho Invoice</span>
+              <span class="tag tag-blue">Google Drive</span>
+              <span class="tag tag-green">23 Steps</span>
+            </div>
+            <div class="sys-chevron">▾</div>
+          </div>
+          <div class="system-body">
+            <div class="flow-steps">
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Docsketch Trigger</div>
+                  <div class="step-title">Document Completed Event</div>
+                  <div class="step-detail">Fires when client signs the contract. Filter confirms document name contains "Everly & Co. Photography Contract" to avoid false triggers from other templates.</div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Google Sheets × 2 + Formatter</div>
+                  <div class="step-title">Lookup Lead + Project + Compute Dates</div>
+                  <div class="step-detail">Fetches lead by email (from contract signee), fetches project row. Computes invoice date (today) and due date (today + 7 days) using Zapier Formatter date math.</div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Zoho Invoice</div>
+                  <div class="step-title">Find Contact in CRM</div>
+                  <div class="step-detail">Searches Zoho Invoice for existing contact by email. Returns contact_id if found, empty if not. Result feeds the branch condition.</div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Zapier Branching</div>
+                  <div class="step-title">New Client vs. Returning Client</div>
+                  <div class="step-detail">Path A: contact_id exists → returning client, skip creation. Path B: contact_id absent → new client, create Zoho contact first.</div>
+                  <div>
+                    <span class="badge-branch">→ Path A — Returning Client</span>
+                    <span class="badge-branch">→ Path B — New Client (Create Contact First)</span>
+                  </div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Zoho Invoice</div>
+                  <div class="step-title">Create Deposit Invoice + Auto-Send</div>
+                  <div class="step-detail">Creates invoice with 30% deposit amount from Projects sheet. Sets due date 7 days out. Marks as sent, triggers Zoho's built-in invoice email to client.</div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Google Drive</div>
+                  <div class="step-title">Create Gallery Folder</div>
+                  <div class="step-detail">Creates named folder in "Everly Galleries" directory: "{EVR-YEAR-XXXX} - {Client Name} Gallery". This folder will later receive delivered images and be shared in System 4.</div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Google Sheets × 2 + Webhook</div>
+                  <div class="step-title">Update Projects + Pipeline + Notify Bot</div>
+                  <div class="step-detail">Projects sheet: Zoho contact_id, invoice status, gallery folder link, signed status flags. Pipeline Tracker: Stage "Invoice Sent", Next "Await Deposit Payment". Webhook to /invoice_sent endpoint on Railway backend.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- SYSTEM 4 -->
+        <div class="system-entry reveal">
+          <div class="system-header" onclick="toggleSystem(this)">
+            <div class="sys-num-badge">4</div>
+            <div class="sys-meta">
+              <div class="sys-category">Delivery Pipeline</div>
+              <div class="sys-title">Gallery Delivery</div>
+              <div class="sys-desc">When Victoria uploads photos, a webhook triggers automated gallery sharing, a personalized delivery email, and a Zoho balance invoice — all in one coordinated flow.</div>
+            </div>
+            <div class="sys-tags">
+              <span class="tag tag-blue">Google Drive Share</span>
+              <span class="tag tag-gold">Zoho Invoice</span>
+              <span class="tag tag-green">Gmail</span>
+              <span class="tag tag-muted">Webhook</span>
+            </div>
+            <div class="sys-chevron">▾</div>
+          </div>
+          <div class="system-body">
+            <div class="flow-steps">
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Webhook → Google Sheets</div>
+                  <div class="step-title">Trigger + Lookup Project</div>
+                  <div class="step-detail">Backend fires webhook with lead_id, gallery_url, delivery_date. Fetches Projects row to get Zoho customer_id, balance amount, client email.</div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Google Drive</div>
+                  <div class="step-title">Share Gallery Folder</div>
+                  <div class="step-detail">Sets gallery folder permission to "public_link_view" — client can access without needing a Google account. No manual sharing step needed.</div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Gmail</div>
+                  <div class="step-title">Personalized Gallery Delivery Email</div>
+                  <div class="step-detail">HTML email from Victoria with direct gallery link, warm congratulatory tone. Subject includes client's first name and a celebratory emoji.</div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Zoho Invoice</div>
+                  <div class="step-title">Create Balance Invoice</div>
+                  <div class="step-detail">Automatically creates the remaining balance invoice using the balance amount stored in Projects sheet. Sends directly to client via Zoho's email system. Includes balance due date from webhook payload.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- SYSTEM 5 -->
+        <div class="system-entry reveal">
+          <div class="system-header" onclick="toggleSystem(this)">
+            <div class="sys-num-badge">5</div>
+            <div class="sys-meta">
+              <div class="sys-category">Retention Engine</div>
+              <div class="sys-title">Review + Rebooking Sequence</div>
+              <div class="sys-desc">Post-gallery delivery, this system sends a review request email immediately, then waits 7 days and sends a personalized rebooking invitation. LTV and booking count fields are updated in the Projects sheet.</div>
+            </div>
+            <div class="sys-tags">
+              <span class="tag tag-gold">7-Day Delay</span>
+              <span class="tag tag-green">Gmail × 2</span>
+              <span class="tag tag-blue">LTV Tracking</span>
+              <span class="tag tag-muted">Webhook × 2</span>
+            </div>
+            <div class="sys-chevron">▾</div>
+          </div>
+          <div class="system-body">
+            <div class="flow-steps">
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Webhook → Gmail</div>
+                  <div class="step-title">Review Request Email (Immediate)</div>
+                  <div class="step-detail">Sent immediately after gallery delivery. References the specific event type. Includes Google review link. Mentions print/album upsell opportunity. Signs off personally as Victoria. Fires /retention_notify webhook to update backend.</div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Google Sheets</div>
+                  <div class="step-title">Update LTV + Review Flags</div>
+                  <div class="step-detail">Marks Projects sheet: review_sent = TRUE, rebooking_sent_flag, and timestamps the action. Used for lifetime value tracking and retention analytics.</div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Zapier Delay</div>
+                  <div class="step-title">7-Day Wait</div>
+                  <div class="step-detail">Zapier's built-in delay holds execution for exactly 7 days — no cron job or additional backend needed. The task sits in Zapier's queue until the timer fires.</div>
+                </div>
+              </div>
+              <div class="flow-step">
+                <div class="step-node"></div>
+                <div class="step-content">
+                  <div class="step-source">Gmail + Webhook</div>
+                  <div class="step-title">Rebooking Email + Backend Notify</div>
+                  <div class="step-detail">Personal rebooking email from Victoria referencing the previous event type. Links to a new inquiry Google Form. Signs off warmly. Fires /retention_5b_notify for backend LTV recalculation.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider"></div>
+
+  <!-- ════════════════ TOOLS ════════════════ -->
+  <section id="tools">
+    <div class="container">
+      <div class="reveal">
+        <div class="section-eyebrow">Tools &amp; Integrations</div>
+        <h2>12 systems.<br><em>One connected stack.</em></h2>
+      </div>
+      <div class="tools-grid reveal">
+        <div class="tool-card">
+          <span class="tool-emoji">⚡</span>
+          <div class="tool-name">Zapier</div>
+          <div class="tool-role">Orchestration Layer</div>
+          <div class="tool-desc">All 9 systems built natively in Zapier. Branching, filtering, delays, webhooks, and formatter logic across 100+ steps total.</div>
+        </div>
+        <div class="tool-card">
+          <span class="tool-emoji">🧠</span>
+          <div class="tool-name">OpenAI GPT-4o-mini</div>
+          <div class="tool-role">AI Engine (× 15+ calls)</div>
+          <div class="tool-desc">Lead classification, package recommendation, email copywriting, Telegram notifications, follow-up task generation, and urgency scoring.</div>
+        </div>
+        <div class="tool-card">
+          <span class="tool-emoji">📊</span>
+          <div class="tool-name">Google Sheets</div>
+          <div class="tool-role">Multi-Table CRM</div>
+          <div class="tool-desc">5 worksheets: Leads, Pipeline Tracker, Clients, Projects, Config. Real-time updates across every system — the source of truth for the entire operation.</div>
+        </div>
+        <div class="tool-card">
+          <span class="tool-emoji">📅</span>
+          <div class="tool-name">Cal.com</div>
+          <div class="tool-role">Booking Infrastructure</div>
+          <div class="tool-desc">Custom booking page with lead_id pre-embedded in URL params. Webhook fires on booking to trigger System 1.5A automatically.</div>
+        </div>
+        <div class="tool-card">
+          <span class="tool-emoji">✍️</span>
+          <div class="tool-name">Docsketch</div>
+          <div class="tool-role">E-Signature + Contract</div>
+          <div class="tool-desc">Template-based contract generation with 10 pre-filled fields. Completion event triggers System 3B. Handles the entire signing lifecycle.</div>
+        </div>
+        <div class="tool-card">
+          <span class="tool-emoji">💰</span>
+          <div class="tool-name">Zoho Invoice</div>
+          <div class="tool-role">Billing CRM</div>
+          <div class="tool-desc">Automated deposit and balance invoice creation. New/returning client branching. Direct email delivery. Used in both System 3B and System 4.</div>
+        </div>
+        <div class="tool-card">
+          <span class="tool-emoji">📁</span>
+          <div class="tool-name">Google Drive + Docs</div>
+          <div class="tool-role">Document Storage</div>
+          <div class="tool-desc">Proposal template merge (Docs), gallery folder creation per client (Drive), automated sharing permissions — all without manual file management.</div>
+        </div>
+        <div class="tool-card">
+          <span class="tool-emoji">✉️</span>
+          <div class="tool-name">Gmail</div>
+          <div class="tool-role">Email Delivery</div>
+          <div class="tool-desc">All client-facing emails sent via Gmail. Always as "Victoria Everly" with HTML formatting. 7+ unique email types across the lifecycle — all AI-generated.</div>
+        </div>
+        <div class="tool-card">
+          <span class="tool-emoji">📱</span>
+          <div class="tool-name">Telegram Bot</div>
+          <div class="tool-role">Owner Notifications</div>
+          <div class="tool-desc">Real-time alerts for new inquiries, discovery call bookings, contract sends, and gallery deliveries. AI-formatted for scannability on mobile.</div>
+        </div>
+        <div class="tool-card">
+          <span class="tool-emoji">🚂</span>
+          <div class="tool-name">Railway.app</div>
+          <div class="tool-role">Backend Bot Server</div>
+          <div class="tool-desc">Custom Python server handling pipeline command logic. Receives webhooks at named endpoints and coordinates bot responses across systems.</div>
+        </div>
+        <div class="tool-card">
+          <span class="tool-emoji">🐍</span>
+          <div class="tool-name">Python (Zapier Code)</div>
+          <div class="tool-role">Custom Logic</div>
+          <div class="tool-desc">ID generation (EVR-YEAR-XXXX) and pricing calculator with fallback logic used in Systems 2 and 3A. Runs natively inside Zapier with no external dependencies.</div>
+        </div>
+        <div class="tool-card">
+          <span class="tool-emoji">📋</span>
+          <div class="tool-name">Google Forms</div>
+          <div class="tool-role">Lead Capture Entry Point</div>
+          <div class="tool-desc">9-field inquiry form is the only human touchpoint. Everything after submission is automated. Fields map directly to Leads sheet columns.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider"></div>
+
+  <!-- ════════════════ BEFORE / AFTER ════════════════ -->
+  <section id="comparison">
+    <div class="container">
+      <div class="reveal">
+        <div class="section-eyebrow">Operational Impact</div>
+        <h2>Before the system.<br><em>After the system.</em></h2>
+      </div>
+      <div class="compare-grid reveal">
+        <div class="compare-col before">
+          <div class="compare-col-header">
+            <span class="compare-col-badge">✗ Before — Manual Operations</span>
+          </div>
+          <div class="compare-item">
+            <span class="compare-icon">🕐</span>
+            <div class="compare-text">New inquiries sit in email for hours or days. By the time Victoria responds, HOT leads have already booked a competitor.</div>
+          </div>
+          <div class="compare-item">
+            <span class="compare-icon">❓</span>
+            <div class="compare-text">No lead scoring. Every inquiry treated the same regardless of budget, urgency, or booking intent.</div>
+          </div>
+          <div class="compare-item">
+            <span class="compare-icon">✍️</span>
+            <div class="compare-text">Every email written from scratch. Inconsistent tone, varying quality, and forgotten follow-ups for no-shows or reschedules.</div>
+          </div>
+          <div class="compare-item">
+            <span class="compare-icon">📋</span>
+            <div class="compare-text">Proposals created manually in Canva or Word. No standardized pricing, no project ID system, no audit trail.</div>
+          </div>
+          <div class="compare-item">
+            <span class="compare-icon">📄</span>
+            <div class="compare-text">Contracts sent manually via PDF. Tracking is a shared spreadsheet updated by hand, often days late.</div>
+          </div>
+          <div class="compare-item">
+            <span class="compare-icon">💸</span>
+            <div class="compare-text">Balance invoice sometimes forgotten. Gallery shared manually. No rebooking sequence, no review requests.</div>
+          </div>
+        </div>
+        <div class="compare-col after">
+          <div class="compare-col-header">
+            <span class="compare-col-badge">✓ After — Fully Automated Pipeline</span>
+          </div>
+          <div class="compare-item">
+            <span class="compare-icon">⚡</span>
+            <div class="compare-text">Inquiry submitted → AI classifies lead → personalized email sent → Telegram notification delivered. Total time: under 60 seconds, zero manual action.</div>
+          </div>
+          <div class="compare-item">
+            <span class="compare-icon">🎯</span>
+            <div class="compare-text">Every lead scored 1–10, categorized HOT/WARM/COLD, matched to ideal package, and given a precise follow-up due date. Victoria knows exactly who to call and when.</div>
+          </div>
+          <div class="compare-item">
+            <span class="compare-icon">✉️</span>
+            <div class="compare-text">7+ unique email types, all AI-written with lead-status-aware tone. No-shows, reschedules, and call continuations each get a precisely tuned follow-up.</div>
+          </div>
+          <div class="compare-item">
+            <span class="compare-icon">📄</span>
+            <div class="compare-text">Proposals generated from Google Docs template in seconds. Unique project IDs auto-assigned. PDF link embedded in AI-written delivery email.</div>
+          </div>
+          <div class="compare-item">
+            <span class="compare-icon">✍️</span>
+            <div class="compare-text">Contract auto-generated with 10 pre-filled fields, deposit auto-calculated, sent via Docsketch. On signature: invoice created, gallery folder provisioned, all sheets updated.</div>
+          </div>
+          <div class="compare-item">
+            <span class="compare-icon">🔄</span>
+            <div class="compare-text">Gallery delivered, balance invoice auto-sent, review request fired immediately, rebooking email queued for 7 days later. LTV tracked. Zero revenue leakage.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider"></div>
+
+  <!-- ════════════════ IMPACT METRICS ════════════════ -->
+  <section id="impact">
+    <div class="container">
+      <div class="reveal">
+        <div class="section-eyebrow">System Performance</div>
+        <h2>What this system<br><em>actually delivers</em></h2>
+      </div>
+      <div class="impact-grid reveal">
+        <div class="impact-card">
+          <div class="impact-num">&lt;60s</div>
+          <div class="impact-label">First Response Time</div>
+          <div class="impact-detail">From form submission to personalized email in the client's inbox. No human bottleneck. Hot leads never go cold while Victoria is on a shoot.</div>
+        </div>
+        <div class="impact-card">
+          <div class="impact-num">15+</div>
+          <div class="impact-label">AI Calls Per Lead</div>
+          <div class="impact-detail">Each lead triggers multiple GPT-4o-mini completions: classification, package recommendation, email subject, email body, urgency scoring, task brief, Telegram notification.</div>
+        </div>
+        <div class="impact-card">
+          <div class="impact-num">0</div>
+          <div class="impact-label">Manual Emails Written</div>
+          <div class="impact-detail">From inquiry acknowledgment to review request — every client-facing email is AI-generated, brand-consistent, and context-aware. Victoria only responds to replies.</div>
+        </div>
+        <div class="impact-card">
+          <div class="impact-num">5</div>
+          <div class="impact-label">Google Sheets Synced Live</div>
+          <div class="impact-detail">Leads, Pipeline Tracker, Clients, Projects, Config — all updated in real-time across every automation system. One source of truth, always current.</div>
+        </div>
+        <div class="impact-card">
+          <div class="impact-num">4</div>
+          <div class="impact-label">Call Outcome Scenarios Handled</div>
+          <div class="impact-detail">System 1.5B handles: completed &amp; continue, no-show, reschedule, and on-call reschedule — each with a unique AI-crafted email response.</div>
+        </div>
+        <div class="impact-card">
+          <div class="impact-num">100%</div>
+          <div class="impact-label">Pipeline Visibility</div>
+          <div class="impact-detail">Every client has a real-time row in the Pipeline Tracker showing current stage, last action, next action, and timestamps — updated automatically at every system transition.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider"></div>
+
+  <!-- ════════════════ TECHNICAL DEPTH ════════════════ -->
+  <section id="tech">
+    <div class="container">
+      <div class="reveal">
+        <div class="section-eyebrow">Technical Depth</div>
+        <h2>Engineering decisions<br><em>worth noting</em></h2>
+        <p class="lead" style="margin-top:12px;">Four examples of deliberate technical thinking behind the system — not just "connecting tools", but building reliably.</p>
+      </div>
+      <div class="tech-grid reveal">
+
+        <div class="tech-card">
+          <div class="tech-eyebrow">Structured AI Outputs</div>
+          <h3>Schema-Enforced GPT Responses</h3>
+          <p>Every AI step uses a defined outputSchema — not free-form text parsing. This means Zapier can map AI outputs like <code style="font-family:var(--mono);font-size:12px;color:var(--gold);background:var(--gold-pale);padding:2px 5px;border-radius:3px;">lead_status</code> and <code style="font-family:var(--mono);font-size:12px;color:var(--gold);background:var(--gold-pale);padding:2px 5px;border-radius:3px;">urgency_score</code> as discrete fields in downstream steps — eliminating parsing errors entirely.</p>
+          <div class="code-block">
+<span class="cc">// Output schema enforced on every AI step</span>
+outputSchema: {
+  <span class="cs">"lead_status"</span>:         <span class="cs">""</span>,
+  <span class="cs">"urgency_score"</span>:        <span class="cs">""</span>,
+  <span class="cs">"summary"</span>:              <span class="cs">""</span>,
+  <span class="cs">"recommended_action"</span>:   <span class="cs">""</span>
+}</div>
+        </div>
+
+        <div class="tech-card">
+          <div class="tech-eyebrow">ID Generation System</div>
+          <h3>Atomic Counter with Config Sheet</h3>
+          <p>Lead IDs and Project IDs use a Config sheet counter to prevent duplicates. Zapier reads the current counter, increments by 1, and writes back before creating the record — a lightweight atomic operation without a database.</p>
+          <div class="code-block">
+<span class="cc"># System 2 — Project ID Generator</span>
+<span class="ck">from</span> datetime <span class="ck">import</span> datetime
+
+year   = datetime.now().year
+suffix = lead_id.replace(<span class="cs">"LED-"</span>, <span class="cs">""</span>)[<span class="cn">-4</span>:]
+project_id = <span class="ck">f</span><span class="cs">"EVR-{year}-{suffix}"</span>
+<span class="cc"># → EVR-2026-0042</span></div>
+        </div>
+
+        <div class="tech-card">
+          <div class="tech-eyebrow">Pricing Engine</div>
+          <h3>4-Tier Fallback Price Resolution</h3>
+          <p>System 3A's Python pricing calculator uses a strict priority chain: (1) operator-confirmed amount via /setbudget for $10,000+/TBD leads, (2) client-selected budget from the form ($1k–$10k fixed options), (3) PRICE_MAP by package name, (4) raw budget string parsing. Client budget always takes precedence over package defaults.</p>
+          <div class="code-block">
+BUDGET_MAP = {
+  <span class="cs">"$1,000"</span>: <span class="cn">1000</span>, <span class="cs">"$3,000"</span>: <span class="cn">3000</span>,
+  <span class="cs">"$5,000"</span>: <span class="cn">5000</span>, <span class="cs">"$7,500"</span>: <span class="cn">7500</span>,
+  <span class="cs">"$10,000"</span>: <span class="cn">10000</span>,
+}
+deposit = round(total * <span class="cn">0.30</span>)
+balance = total <span class="ck">-</span> deposit</div>
+        </div>
+
+        <div class="tech-card">
+          <div class="tech-eyebrow">Webhook Architecture</div>
+          <h3>Backend Bot on Railway.app</h3>
+          <p>A custom Python server on Railway.app serves as the command router. Victoria sends pipeline commands from Telegram that fire Zapier webhooks — decoupling the CRM layer from the automation layer entirely.</p>
+          <div class="code-block">
+<span class="cc"># Railway endpoints across systems</span>
+POST <span class="cf">/pipeline_notify</span>   <span class="cc"># Sys 1.5A</span>
+POST <span class="cf">/proposal_notify</span>   <span class="cc"># Sys 2</span>
+POST <span class="cf">/invoice_sent</span>      <span class="cc"># Sys 3B</span>
+POST <span class="cf">/gallery_notify</span>    <span class="cc"># Sys 4</span>
+POST <span class="cf">/retention_notify</span>  <span class="cc"># Sys 5A</span>
+POST <span class="cf">/retention_5b_notify</span> <span class="cc"># Sys 5B</span></div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider"></div>
+
+  <!-- ════════════════ VIDEO ════════════════ -->
+  <section id="video">
+    <div class="container">
+      <div class="reveal">
+        <div class="section-eyebrow">Walkthrough Video</div>
+        <h2>See the system<br><em>in action</em></h2>
+        <p class="lead" style="margin-top:12px;">A 3-minute walkthrough showing the full pipeline — from Google Form submission to Telegram notification, proposal generation, contract signing, and gallery delivery.</p>
+      </div>
+      <div class="video-shell reveal">
+        <!--
+          TO EMBED YOUR VIDEO, replace .video-inner with:
+          <iframe style="position:absolute;inset:0;width:100%;height:100%;border:0"
+            src="https://www.loom.com/embed/YOUR-LOOM-ID" allowfullscreen></iframe>
+          OR for YouTube:
+          <iframe style="position:absolute;inset:0;width:100%;height:100%;border:0"
+            src="https://www.youtube.com/embed/YOUR-VIDEO-ID" allowfullscreen></iframe>
+        -->
+        <div class="video-inner">
+          <div class="play-ring"><span>▶</span></div>
+          <div class="video-label">System Walkthrough — 3 min</div>
+          <div class="video-sub">Embed your Loom or YouTube video here</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider"></div>
+
+  <!-- ════════════════ CLOSING CTA ════════════════ -->
+  <section id="closing">
+    <div class="container">
+      <div class="reveal">
+        <div class="section-eyebrow" style="justify-content:center; color:rgba(212,170,112,0.8);">Built by a Systems Thinker</div>
+        <h2>This is what I<br><em>build for teams.</em></h2>
+        <p class="lead">
+          If your business has manual workflows, scattered data, or unreliable follow-ups — I can design and build systems like this for you. Every touchpoint automated. Every process documented. Zero operational chaos.
+        </p>
+        <div class="cta-row">
+          <a href="mailto:dlanders072@gmail.com" class="btn-primary">Get in Touch →</a>
+          <a href="#systems" class="btn-ghost">Review the Systems</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ════════════════ FOOTER ════════════════ -->
+  <footer>
+    <p>Everly &amp; Co. Photography — Automation Case Study · Built with Zapier · OpenAI · Google Workspace · Docsketch · Zoho</p>
+    <div class="footer-links">
+      <a href="#hero">Top</a>
+      <a href="#systems">Systems</a>
+      <a href="#tech">Technical</a>
+      <a href="#video">Video</a>
+    </div>
+  </footer>
+
+  <script>
+    // ─── Theme Toggle ───
+    function toggleTheme() {
+      const html = document.documentElement;
+      const isDark = html.getAttribute('data-theme') === 'dark';
+      html.setAttribute('data-theme', isDark ? 'light' : 'dark');
+      document.getElementById('themeIcon').textContent  = isDark ? '🌙' : '☀️';
+      document.getElementById('themeLabel').textContent = isDark ? 'Dark' : 'Light';
+      localStorage.setItem('everly-theme', isDark ? 'light' : 'dark');
+    }
+
+    // Restore saved preference
+    (function() {
+      const saved = localStorage.getItem('everly-theme');
+      if (saved === 'dark') {
+        document.documentElement.setAttribute('data-theme', 'dark');
+        document.getElementById('themeIcon').textContent  = '☀️';
+        document.getElementById('themeLabel').textContent = 'Light';
+      }
+    })();
+
+    // ─── Accordion Toggle ───
+    function toggleSystem(header) {
+      const entry = header.closest('.system-entry');
+      const body  = header.nextElementSibling;
+      const isOpen = body.classList.contains('open');
+
+      // Close all
+      document.querySelectorAll('.system-body').forEach(b => b.classList.remove('open'));
+      document.querySelectorAll('.system-entry').forEach(e => e.classList.remove('open'));
+
+      if (!isOpen) {
+        body.classList.add('open');
+        entry.classList.add('open');
+      }
+    }
+
+    // ─── Scroll Reveal ───
+    const revealObserver = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('visible');
+          revealObserver.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.08, rootMargin: '0px 0px -40px 0px' });
+
+    document.querySelectorAll('.reveal').forEach(el => revealObserver.observe(el));
+
+    // ─── Nav scroll shadow ───
+    const nav = document.getElementById('nav');
+    window.addEventListener('scroll', () => {
+      nav.classList.toggle('scrolled', window.scrollY > 12);
+    }, { passive: true });
+
+    // ─── Auto-open first system on load ───
+    window.addEventListener('load', () => {
+      setTimeout(() => {
+        const first = document.querySelector('.system-header');
+        if (first) toggleSystem(first);
+      }, 900);
+    });
+  </script>
+
+</body>
+</html>
